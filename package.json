@@ -1,17 +1,17 @@
 {
-	"name": "@harperdb/nextjs",
+	"name": "@harperfast/nextjs",
 	"version": "1.1.4",
 	"type": "module",
-	"description": "A HarperDB Component for running Next.js apps.",
+	"description": "A Harper plugin for running Next.js apps.",
 	"keywords": [
 		"harperdb",
 		"next.js",
 		"distributed",
 		"applications"
 	],
-	"homepage": "https://github.com/HarperDB/nextjs",
+	"homepage": "https://github.com/HarperFast/nextjs",
 	"bugs": {
-		"url": "https://github.com/HarperDB/nextjs/issues",
+		"url": "https://github.com/HarperFast/nextjs/issues",
 		"email": "support@harperdb.io"
 	},
 	"author": {
@@ -20,11 +20,12 @@
 	},
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/HarperDB/nextjs.git"
+		"url": "git+https://github.com/HarperFast/nextjs.git"
 	},
 	"license": "Apache-2.0",
 	"bin": {
-		"harperdb-nextjs": "cli.js"
+		"harperdb-nextjs": "cli.js",
+		"harper-next": ""
 	},
 	"files": [
 		"config.yaml",
@@ -37,12 +38,33 @@
 		"format:fix": "npm run format -- --write",
 		"lint": "eslint ."
 	},
+	"engines": {
+		"node": "22"
+	},
+	"devEngines": {
+		"runtime": {
+			"name": "node",
+			"version": "22"
+		}
+	},
 	"devDependencies": {
 		"@eslint/js": "^9.17.0",
 		"@harperdb/code-guidelines": "^0.0.2",
+		"@types/node": "^22.19.11",
 		"eslint": "^9.17.0",
 		"globals": "^15.14.0",
-		"prettier": "^3.4.2"
+		"harperdb": "^4.7.19",
+		"next": "^15.5.12",
+		"prettier": "^3.4.2",
+		"typescript": "^5.9.3"
+	},
+	"peerDependencies": {
+		"next": "^15.5.12 || ^16.1.6"
+	},
+	"peerDependenciesMeta": {
+		"next": {
+			"optional": false
+		}
 	},
 	"prettier": "@harperdb/code-guidelines/prettier"
 }
