@@ -37,6 +37,12 @@ function assertType(name, option, expectedType) {
 	}
 }
 
+// loggerWithTag is kinda weird as it will set log methods like `.debug()` to `null`
+// based on the configuerd log level. So now all calls to these log methods need to use `?.()`
+// like `extensionLogger.debug?.('whoops!');`.
+// This should be fixed when we migrate to plugin api.
+const extensionLogger = logger.loggerWithTag('@harperdb/nextjs', true);
+
 /**
  * Resolves the incoming extension options into a config for use throughout the extension.
  *
@@ -78,7 +84,7 @@ function resolveConfig(options) {
 		setCwd: options.setCwd ?? false,
 	};
 
-	logger.debug('@harperdb/nextjs extension configuration:\n' + JSON.stringify(config, undefined, 2));
+	extensionLogger.debug?.('configuration:\n' + JSON.stringify(config, undefined, 2));
 
 	return config;
 }
@@ -91,7 +97,7 @@ function resolveConfig(options) {
  * @returns {string} The path to the Next.js main file
  */
 function assertNextJSApp(componentPath) {
-	logger.debug(`Verifying ${componentPath} is a Next.js application`);
+	extensionLogger.debug?.(`Verifying ${componentPath} is a Next.js application`);
 
 	try {
 		if (!existsSync(componentPath)) {
@@ -136,9 +142,9 @@ function assertNextJSApp(componentPath) {
 		}
 	} catch (error) {
 		if (error instanceof HarperDBNextJSExtensionError) {
-			logger.fatal(`Component path is not a Next.js application: ` + error.message);
+			extensionLogger.fatal?.(`Component path is not a Next.js application: ` + error.message);
 		} else {
-			logger.fatal(`Unexpected Error thrown during Next.js Verification: ` + error.toString());
+			extensionLogger.fatal?.(`Unexpected Error thrown during Next.js Verification: ` + error.toString());
 		}
 
 		throw error;
@@ -165,7 +171,7 @@ export function startOnMainThread(options = {}) {
 
 			if (config.buildOnly) {
 				await build(config, componentPath, options.server);
-				logger.info('@harperdb/nextjs extension build only mode is enabled, exiting');
+				extensionLogger.info?.('build only mode is enabled, exiting');
 				process.exit(0);
 			}
 
@@ -274,7 +280,7 @@ async function build(config, componentPath, server) {
 
 		// Build
 		try {
-			logger.info(`Building Next.js application at ${componentPath}`);
+			extensionLogger.info?.(`Building Next.js application at ${componentPath}`);
 
 			const timerStart = performance.now();
 
@@ -287,8 +293,23 @@ async function build(config, componentPath, server) {
 				stdio: ['ignore', 'pipe', 'pipe'],
 			});
 
-			buildProcess.stdout.on('data', (c) => stdout.push(c));
-			buildProcess.stderr.on('data', (c) => stderr.push(c));
+			const stdoutLogger = logger.loggerWithTag('@harperdb/nextjs:build:stdout', true);
+			const stderrLogger = logger.loggerWithTag('@harperdb/nextjs:build:stderr', true);
+
+			buildProcess.stdout.on('data', (c) => {
+				stdout.push(c);
+				const chunk = c.toString().trim();
+				chunk.split('\n').forEach((line) => {
+					stdoutLogger.debug?.(line.trim());
+				});
+			});
+			buildProcess.stderr.on('data', (c) => {
+				stderr.push(c);
+				const chunk = c.toString().trim();
+				chunk.split('\n').forEach((line) => {
+					stderrLogger.debug?.(line.trim());
+				});
+			});
 
 			const [code, signal] = await once(buildProcess, 'close');
 
@@ -298,22 +319,28 @@ async function build(config, componentPath, server) {
 				logger.warn(`Build command \`${config.buildCommand}\` exited with code ${code} and signal ${signal}`);
 			}
 
-			if (stdout.length > 0) {
-				logger.info(Buffer.concat(stdout).toString());
+			// If debug method isn't defined then the debug logs above didn't run (based on log level)
+			// So now print out the collected stdout and stderr to info and error respectively.
+			// This extension has been logging this out from the beginning so we should maintain that, but
+			// we don't need to double up the same logs.
+			if (!extensionLogger.debug) {
+				if (stdout.length > 0) {
+					extensionLogger.info?.(Buffer.concat(stdout).toString());
+				}
+
+				if (stderr.length > 0) {
+					extensionLogger.error?.(Buffer.concat(stderr).toString());
+				}
 			}
 
-			if (stderr.length > 0) {
-				logger.error(Buffer.concat(stderr).toString());
-			}
-
-			logger.info(`The Next.js build took ${((duration % 60000) / 1000).toFixed(2)} seconds`);
+			extensionLogger.info?.(`The Next.js build took ${((duration % 60000) / 1000).toFixed(2)} seconds`);
 			server.recordAnalytics(
 				duration,
 				'nextjs_build_time_in_milliseconds',
 				componentPath.toString().slice(0, -1).split('/').pop()
 			);
 		} catch (error) {
-			logger.error(error);
+			extensionLogger.error?.(error);
 		}
 
 		// Release lock and exit
