@@ -1,1 +1,1 @@
-extensionModule: ./extension.js
+pluginModule: dist/plugin.js

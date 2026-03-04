@@ -1,30 +1,38 @@
-import { ConfigValue, Scope, type Config } from 'harperdb';
+import { ConfigValue, Scope, type Config, type Logger } from 'harperdb';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
 import type NextModule from 'next';
 import { cwd } from 'node:process';
 import { equal, notEqual, ok } from 'node:assert/strict';
+import { existsSync, readFileSync } from 'node:fs';
 
-interface NextPluginOptions extends Config {
+interface NextPluginConfig extends Config {
 	buildCommand?: string;
 	buildOnly?: boolean;
 	dev?: boolean;
 	port?: number;
 	prebuilt?: boolean;
-	securePort?: number; 
+	securePort?: number;
 }
 
-function assertType<E extends 'string' | 'number' | 'boolean', R = E extends 'string' ? string : E extends 'number' ? number : boolean>(name: string, option: unknown, expectedType: E): asserts option is R {
-	equal(typeof option, expectedType);
+// Bringing this forward from extension since some validation is better than none.
+// Eventually can remove when plugins have better option validation from core.
+/**
+ * Assert that a given option is a specific type, if it is defined.
+ */
+function assertType(name: string, option: unknown, expectedType: string): void {
+	if (option && typeof option !== expectedType) {
+		throw new Error(`${name} must be type ${expectedType}. Received: ${typeof option}`);
+	}
 }
 
-function assertObject(variable: unknown): asserts variable is object {
-	equal(typeof variable, 'object');
-}
-
-function resolveConfig(options: ConfigValue, logger: any) {
-	// Todo; what if no options specified? Is that `null` or `undefined`? How does yaml parser handle that.
+/**
+ * Validates and resolve plugin options with sensible defaults.
+ */
+function resolveConfig(scope: Scope): NextPluginConfig {
+	const options = scope.options.getAll();
+	// Todo; what if no options specified? Is that `null` or `undefined`? How does yaml parser handle that?
 	// In theory this plugin could work with 0 config... assuming we allow that?
 	// ```yaml
 	// '@harperfast/next':
@@ -58,47 +66,77 @@ function resolveConfig(options: ConfigValue, logger: any) {
 	assertType('prebuilt', options.prebuilt, 'boolean');
 	assertType('securePort', options.securePort, 'number');
 
-	const config = {
-		buildCommand: options.buildCommand ?? 'npx next build',
-		buildOnly: options.buildOnly ?? false,
-		dev: options.dev ?? false,
-		port: options.port,
-		prebuilt: options.prebuilt ?? false,
-		securePort: options.securePort,
+	// TODO: Remove type casts when we have more proper plugin option validation from core
+	return {
+		buildCommand: options.buildCommand as string ?? 'npx next build',
+		buildOnly: options.buildOnly as boolean ?? false,
+		dev: options.dev as boolean ?? false,
+		port: options.port as number,
+		prebuilt: options.prebuilt as boolean ?? false,
+		securePort: options.securePort as number,
 		setCwd: options.setCwd ?? false,
-	};
+	} satisfies NextPluginConfig;
+}
 
-	logger.debug('@harperdb/nextjs extension configuration:\n' + JSON.stringify(config, undefined, 2));
+function assertNextApp({ appName, directory, logger }: Scope): boolean {
+	logger.debug?.(`Verifying ${directory} is a Next.js application`);
 
-	return config;
+	// Couple options to check if its a Next.js project
+	// 1. Check for Next.js config file (next.config.{js|mjs|ts})
+	//    - This file is not required for a Next.js project
+	// 2. Check package.json for Next.js dependency
+	//    - It could be listed in `dependencies` or `devDependencies` (and maybe even `peerDependencies` or `optionalDependencies`)
+	//    - Also not required. Users can use `npx next ...`
+	// 3. Check for `.next` folder
+	//    - This could be a reasonable fallback if we want to support pre-built Next.js apps
+
+	// A combination of options 1 and 2 should be sufficient for our purposes.
+	// Known Edge case: app does not have a config and are using `npx` (or something similar) to execute Next.js
+
+	// Check for Next.js Config
+	const configExists = ['js', 'mjs', 'ts'].some((ext) => existsSync(join(directory, `next.config.${ext}`)));
+
+	// Check for dependency
+	let dependencyExists = false;
+	const packageJSONPath = join(directory, 'package.json');
+	if (existsSync(packageJSONPath)) {
+		const packageJSON = JSON.parse(readFileSync(packageJSONPath, 'utf8'));
+		dependencyExists = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'].some(dependencyList => packageJSON[dependencyList]?.['next']);
+	}
+
+	if (!configExists && !dependencyExists) {
+		logger.fatal?.(
+			`Failed to verify ${appName} application as a Next.js project. It is missing both a Next.js config file and the "next" dependency in package.json`
+		);
+
+		return false;
+	}
+
+	return true;
 }
 
 export async function handleApplication(scope: Scope) {
-	const options = scope.options.getAll();
-	const config = resolveConfig(options, scope.logger);
-	const { next, version } = await importNext(scope.directory);
+	const config = resolveConfig(scope);
+	const { next, version } = await importNext(scope);
 
-	console.log(version);
-	console.log(typeof next);
+	scope.logger.debug?.('next version', version);
+	scope.logger.debug?.('typeof next', typeof next);
+
+	if (!assertNextApp(scope)) {
+		return;
+	}
 }
 
-function detectNextVersion(componentPath: string): number {
-  const require = createRequire(join(componentPath, 'package.json'));
+function detectNextVersion(scope: Scope): number {
+  const require = createRequire(join(scope.directory, 'package.json'));
   const nextPackage = require('next/package.json');
   return parseInt(nextPackage.version.split('.')[0], 10);
 }
 
-async function importNext(componentPath: string) {
-  const require = createRequire(join(componentPath, 'package.json'));
+async function importNext(scope: Scope) {
+  const require = createRequire(join(scope.directory, 'package.json'));
   const nextPath = pathToFileURL(require.resolve('next'));
   const nextModule = await import(nextPath.href);
   const next = nextModule.default as typeof NextModule.default;
-  return { next, version: detectNextVersion(componentPath) };
+  return { next, version: detectNextVersion(scope) };
 }
-
-function serve () {
-
-}
-
-// @ts-expect-error
-handleApplication({ directory: cwd() });

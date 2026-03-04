@@ -25,7 +25,7 @@
 	"license": "Apache-2.0",
 	"bin": {
 		"harperdb-nextjs": "cli.js",
-		"harper-next": ""
+		"harper-next": "cli.js"
 	},
 	"files": [
 		"config.yaml",
@@ -36,7 +36,8 @@
 		"format": "prettier .",
 		"format:check": "npm run format -- --check",
 		"format:fix": "npm run format -- --write",
-		"lint": "eslint ."
+		"lint": "eslint .",
+		"build": "tsc"
 	},
 	"engines": {
 		"node": "22"
@@ -48,15 +49,15 @@
 		}
 	},
 	"devDependencies": {
-		"@eslint/js": "^9.17.0",
-		"@harperdb/code-guidelines": "^0.0.2",
-		"@types/node": "^22.19.11",
-		"eslint": "^9.17.0",
-		"globals": "^15.14.0",
-		"harperdb": "^4.7.19",
-		"next": "^15.5.12",
-		"prettier": "^3.4.2",
-		"typescript": "^5.9.3"
+		"@eslint/js": "9.17.0",
+		"@harperdb/code-guidelines": "0.0.6",
+		"@types/node": "22.19.11",
+		"eslint": "9.17.0",
+		"globals": "15.14.0",
+		"harperdb": "4.7.19",
+		"next": "15.5.12",
+		"prettier": "3.4.2",
+		"typescript": "5.9.3"
 	},
 	"peerDependencies": {
 		"next": "^15.5.12 || ^16.1.6"

@@ -11,7 +11,7 @@
 		"forceConsistentCasingInFileNames": true,
 		"resolveJsonModule": true,
 		"isolatedModules": true,
-		"noEmit": true
+		"outDir": "dist"
 	},
 	"include": ["plugin.ts", "extension.js"]
 }
