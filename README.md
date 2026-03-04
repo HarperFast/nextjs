@@ -122,6 +122,10 @@ Specify a port for the Next.js server. Defaults to the HarperDB default port (ge
 
 When enabled, the extension will look for a `.next` directory in the root of the component and skip executing the `buildCommand`. Defaults to `false`.
 
+### `runFirst: boolean`
+
+Configure the Next.js request handler to run first in the Harper HTTP middleware. When enabled, the Next.js request handler is executed before any other Harper HTTP middleware handlers. This is useful for things such as handling authentication directly with the Next.js app instead of delegating that to Harper. Enabling this option will conflict with other Harper HTTP things such as the REST API. Consider specifying the `port` (or `securePort`) option as well and separating the Next.js app HTTP server from the rest of Harper so there is less conflicts. Defaults to `false`.
+
 ### `securePort: number`
 
 Specify a secure port for the Next.js server. Defaults to the HarperDB default secure port.

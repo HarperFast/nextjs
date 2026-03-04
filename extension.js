@@ -72,6 +72,7 @@ function resolveConfig(options) {
 	assertType('dev', options.dev, 'boolean');
 	assertType('port', options.port, 'number');
 	assertType('prebuilt', options.prebuilt, 'boolean');
+	assertType('runFirst', options.runFirst, 'boolean');
 	assertType('securePort', options.securePort, 'number');
 
 	const config = {
@@ -80,6 +81,7 @@ function resolveConfig(options) {
 		dev: options.dev ?? false,
 		port: options.port,
 		prebuilt: options.prebuilt ?? false,
+		runFirst: options.runFirst ?? false,
 		securePort: options.securePort,
 		setCwd: options.setCwd ?? false,
 	};
@@ -373,7 +375,7 @@ async function serve(config, componentPath, server) {
 				? next(request)
 				: requestHandler(request._nodeRequest, request._nodeResponse, urlParse(request._nodeRequest.url, true));
 		},
-		{ port: config.port, securePort: config.securePort }
+		{ runFirst: config.runFirst, port: config.port, securePort: config.securePort }
 	);
 
 	// Next.js v9 doesn't have an upgrade handler
