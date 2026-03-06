@@ -1,18 +1,23 @@
-import { ConfigValue, Scope, type Config, type Logger } from 'harperdb';
+import type { Scope, Config, ConfigValue, FilesOption } from 'harperdb';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
 import type NextModule from 'next';
 import { cwd } from 'node:process';
 import { equal, notEqual, ok } from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 
 interface NextPluginConfig extends Config {
-	buildCommand?: string;
-	buildOnly?: boolean;
-	dev?: boolean;
+	buildCommand: string;
+	buildOnly: boolean;
+	dev: boolean;
+	// @ts-expect-error
+	files?: FilesOption;
 	port?: number;
-	prebuilt?: boolean;
+	prebuilt: boolean;
+	runFirst: boolean;
 	securePort?: number;
 }
 
@@ -64,6 +69,7 @@ function resolveConfig(scope: Scope): NextPluginConfig {
 	assertType('dev', options.dev, 'boolean');
 	assertType('port', options.port, 'number');
 	assertType('prebuilt', options.prebuilt, 'boolean');
+	assertType('runFirst', options.runFirst, 'boolean');
 	assertType('securePort', options.securePort, 'number');
 
 	// TODO: Remove type casts when we have more proper plugin option validation from core
@@ -71,10 +77,12 @@ function resolveConfig(scope: Scope): NextPluginConfig {
 		buildCommand: options.buildCommand as string ?? 'npx next build',
 		buildOnly: options.buildOnly as boolean ?? false,
 		dev: options.dev as boolean ?? false,
+		// @ts-expect-error
+		files: options.files,
 		port: options.port as number,
 		prebuilt: options.prebuilt as boolean ?? false,
+		runFirst: options.runFirst as boolean ?? false,
 		securePort: options.securePort as number,
-		setCwd: options.setCwd ?? false,
 	} satisfies NextPluginConfig;
 }
 
@@ -115,16 +123,191 @@ function assertNextApp({ appName, directory, logger }: Scope): boolean {
 	return true;
 }
 
+/**
+ * Safely attempts to read the `.next/BUILD_ID`.
+ * 
+ * Returns `null` if it does not exist (empty BUILD_ID file or file does not exist)
+ */
+function getBuildId(scope: Scope) {
+	const buildIdPath = join(scope.directory, '.next', 'BUILD_ID');
+	try {
+		const buildId = readFileSync(buildIdPath, 'utf-8').trim();
+		return buildId || null;
+	} catch (error) {
+		// Ignore ENOENT errors (.next/BUILD_ID does not exist)
+		// @ts-expect-error
+		if (error.code !== 'ENOENT') {
+			return null;
+		}
+		// Otherwise rethrow error
+		throw error;
+	}
+}
+
+
 export async function handleApplication(scope: Scope) {
 	const config = resolveConfig(scope);
-	const { next, version } = await importNext(scope);
 
-	scope.logger.debug?.('next version', version);
-	scope.logger.debug?.('typeof next', typeof next);
+	scope.logger.debug?.('Config: \n', JSON.stringify(config, undefined, 2))
 
 	if (!assertNextApp(scope)) {
 		return;
 	}
+
+	// Initialize the build info as stale.
+	await databases.harperfast_nextjs.nextjs_build_info.put(scope.appName, { buildId: null, status: 'stale' });
+
+	// Figure out what to do with this with the new build info table
+	// if (config.buildOnly) {
+	// 	await build(scope, config);
+	// 	scope.logger.info?.('buildOnly mode is enabled, exiting');
+	// 	process.exit(0);
+	// }
+
+	// If files for the next.js app change, we want to mark the build as stale and request a restart
+	// this way when the threads restart, and see the existing `.next/BUILD_ID` file, they will still rebuild the app.
+	async function entryHandler (entry) {
+		scope.logger.debug?.(`Entry Handler called`, entry)
+		await databases.harperfast_nextjs.nextjs_build_info.put(scope.appName, { buildId: null, status: 'stale' });
+		scope.requestRestart();
+	}
+
+	if (config.files) {
+		// If the user specified files then use the default handler
+		scope.handleEntry(entryHandler);
+	} else {
+		// Otherwise define our own.
+		scope.handleEntry({
+			source: '**/*',
+			ignore: '.next/**/*'
+		}, entryHandler);
+	}
+
+
+	if (config.prebuilt) {
+		if (!existsSync(join(scope.directory, '.next'))) {
+			scope.logger.error?.('Prebuilt mode is enabled, but the .next folder does not exist');
+			return;
+		}
+
+		// In prebuilt mode, we still want to ensure the build is valid by checking for a `buildId`.
+		// We shouldn't try serving (and failing) if we can detect a potentially bad build.
+		// This is based on the assumption that a BUILD_ID file only exists for valid builds; not sure
+		// if that is 100% true or if Next.js provides any other guarantees or validation mechanisms.
+		const buildId = getBuildId(scope);
+		// Immediately set the build info record appropriately
+		await databases.harperfast_nextjs.nextjs_build_info.put(
+			scope.appName, { buildId, status: buildId ? 'success' : 'failure' });
+
+		if (buildId === null) {
+			return;
+		}
+	} else if (!config.dev) {
+		// If not prebuilt mode and not dev mode, then proceed to building
+		try {
+			await build(scope, config);
+		} catch (error) {
+			// if build fails for any reason
+			// mark record as failure, log error, and return
+			await databases.harperfast_nextjs.nextjs_build_info.put(scope.appName, { buildId: null, status: 'failure' });
+			scope.logger.error?.(`Error building Next.js application ${scope.appName}: `, error);
+			return;
+		}
+	}
+
+	await serve(scope, config);
+}
+
+async function build(scope: Scope, config: NextPluginConfig) {
+	const buildInfo = await databases.harperfast_nextjs.nextjs_build_info.get(scope.appName);
+
+	// If the build info record is marked as "failure" just return immediately
+	// avoids building (and failing) on every thread
+	if (buildInfo.status === 'failure') {
+		return;
+	}
+	
+	// If the build info record is marked as "success"
+	if (buildInfo.status === 'success') {
+		// then validate the BUILD_ID value
+		const buildId = getBuildId(scope);
+		if (buildId === buildInfo.buildId) {
+			scope.logger.debug?.(`Fresh build of ${scope.appName} (id: ${buildInfo.buildId}) detected`);
+			// fresh build
+			return;
+		}
+	}
+
+	// Otherwise we have a stale build and now we can proceed with building
+
+	scope.logger.info?.(`Building Next.js application at ${scope.directory}`);
+	const stdout: Buffer[] = [];
+	const stderr: Buffer[] = [];
+	const buildProcess = spawn(config.buildCommand, [], {
+		shell: true,
+		cwd: scope.directory,
+		stdio: ['ignore', 'pipe', 'pipe'],
+	});
+	const stdoutLogger = logger.withTag(`${scope.appName}:build:stdout`);
+	const stderrLogger = logger.withTag(`${scope.appName}:build:stderr`);
+	buildProcess.stdout.on('data', (c: Buffer) => {
+		stdout.push(c);
+		const chunk = c.toString().trim();
+		chunk.split('\n').forEach((line) => {
+			stdoutLogger.debug?.(line.trim());
+		});
+	});
+	buildProcess.stderr.on('data', (c: Buffer) => {
+		stderr.push(c);
+		const chunk = c.toString().trim();
+		chunk.split('\n').forEach((line) => {
+			stderrLogger.debug?.(line.trim());
+		});
+	});
+
+	const [code, signal] = await once(buildProcess, 'close');
+
+	// If debug method isn't defined then the debug logs above didn't run (based on log level)
+	// So now print out the collected stdout and stderr to info and error respectively.
+	// This extension has been logging this out from the beginning so we should maintain that, but
+	// we don't need to double up the same logs.
+	if (!scope.logger.debug) {
+		if (stdout.length > 0) {
+			scope.logger.info?.(Buffer.concat(stdout).toString());
+		}
+
+		if (stderr.length > 0) {
+			scope.logger.error?.(Buffer.concat(stderr).toString());
+		}
+	}
+
+	// Any non 0 exit code is considered a failure
+	if (code !== 0) {
+		// Mark build info record as failure and return
+		await databases.harperfast_nextjs.nextjs_build_info.put(scope.appName, { status: 'failure' });
+		// And throw an error to be caught and logged in `handleApplication()`
+		throw new Error(`Build command \`${config.buildCommand}\` exited with code ${code} and signal ${signal}`)
+	}
+
+	try {
+		const buildIdPath = join(scope.directory, '.next', 'BUILD_ID');
+		const buildId = readFileSync(buildIdPath, 'utf-8');
+		// Update the build info record
+		await databases.harperfast_nextjs.nextjs_build_info.put(scope.appName, { buildId, status: 'success' });
+		scope.logger.debug?.(`Successful build for ${scope.appName} (id ${buildId})`);
+		return;
+	} catch (error) {
+		await databases.harperfast_nextjs.nextjs_build_info.put(scope.appName, { buildId: null, status: 'failure' });
+		scope.logger.debug?.(`Error finalizing successful build for ${scope.appName}`)
+		throw error;
+	}
+}
+
+async function serve(scope: Scope, config: NextPluginConfig) {
+	const { next, version } = await importNext(scope);
+
+	scope.logger.debug?.('next version', version);
+	scope.logger.debug?.('typeof next', typeof next);
 }
 
 function detectNextVersion(scope: Scope): number {

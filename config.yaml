@@ -1,1 +1,4 @@
+graphqlSchema:
+  files: 'schema.graphql'
+
 pluginModule: dist/plugin.js

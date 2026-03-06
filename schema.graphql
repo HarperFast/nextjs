@@ -1,0 +1,5 @@
+type NextBuildInfo @table(database: "harperfast_nextjs", table: "nextjs_build_info") {
+	appName: String @primaryKey
+	buildId: String
+	status: String
+}
