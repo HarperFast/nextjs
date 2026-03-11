@@ -114,36 +114,36 @@ function getBuildId(scope) {
 }
 export async function handleApplication(scope) {
     const config = resolveConfig(scope);
-    scope.logger.debug?.('Config: \n', JSON.stringify(config, undefined, 2));
+    // scope.logger.debug?.('Config: \n', JSON.stringify(config, undefined, 2))
     if (!assertNextApp(scope)) {
         return;
     }
     // Initialize the build info as stale.
-    await databases.harperfast_nextjs.nextjs_build_info.put(scope.appName, { buildId: null, status: 'stale' });
+    // await databases.harperfast_nextjs.nextjs_build_info.put(scope.appName, { buildId: null, status: 'stale' });
     // Figure out what to do with this with the new build info table
     // if (config.buildOnly) {
     // 	await build(scope, config);
     // 	scope.logger.info?.('buildOnly mode is enabled, exiting');
     // 	process.exit(0);
     // }
-    // If files for the next.js app change, we want to mark the build as stale and request a restart
-    // this way when the threads restart, and see the existing `.next/BUILD_ID` file, they will still rebuild the app.
-    async function entryHandler(entry) {
-        scope.logger.debug?.(`Entry Handler called`, entry);
-        await databases.harperfast_nextjs.nextjs_build_info.put(scope.appName, { buildId: null, status: 'stale' });
-        scope.requestRestart();
-    }
-    if (config.files) {
-        // If the user specified files then use the default handler
-        scope.handleEntry(entryHandler);
-    }
-    else {
-        // Otherwise define our own.
-        scope.handleEntry({
-            source: '**/*',
-            ignore: '.next/**/*'
-        }, entryHandler);
-    }
+    // Need to figure this out better.
+    // // If files for the next.js app change, we want to mark the build as stale and request a restart
+    // // this way when the threads restart, and see the existing `.next/BUILD_ID` file, they will still rebuild the app.
+    // async function entryHandler (entry: FileEntryEvent | DirectoryEntryEvent) {
+    // 	scope.logger.debug?.(`Entry Handler called`, entry)
+    // 	await databases.harperfast_nextjs.nextjs_build_info.put(scope.appName, { buildId: null, status: 'stale' });
+    // 	scope.requestRestart();
+    // }
+    // if (config.files) {
+    // 	// If the user specified files then use the default handler
+    // 	scope.handleEntry(entryHandler);
+    // } else {
+    // 	// Otherwise define our own.
+    // 	scope.handleEntry({
+    // 		source: '**/*',
+    // 		ignore: ['.next/**/*', 'node_modules/**/*']
+    // 	}, entryHandler);
+    // }
     if (config.prebuilt) {
         if (!existsSync(join(scope.directory, '.next'))) {
             scope.logger.error?.('Prebuilt mode is enabled, but the .next folder does not exist');
@@ -180,6 +180,7 @@ async function build(scope, config) {
     // If the build info record is marked as "failure" just return immediately
     // avoids building (and failing) on every thread
     if (buildInfo.status === 'failure') {
+        scope.logger.debug?.(`Failure build of ${scope.appName} detected`);
         return;
     }
     // If the build info record is marked as "success"
@@ -253,8 +254,8 @@ async function build(scope, config) {
 }
 async function serve(scope, config) {
     const { next, version } = await importNext(scope);
-    scope.logger.debug?.('next version', version);
-    scope.logger.debug?.('typeof next', typeof next);
+    // scope.logger.debug?.('next version', version);
+    // scope.logger.debug?.('typeof next', typeof next);
 }
 function detectNextVersion(scope) {
     const require = createRequire(join(scope.directory, 'package.json'));
@@ -268,3 +269,4 @@ async function importNext(scope) {
     const next = nextModule.default;
     return { next, version: detectNextVersion(scope) };
 }
+//# sourceMappingURL=plugin.js.map

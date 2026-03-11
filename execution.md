@@ -46,3 +46,35 @@ https://nextjs.org/docs/13/app/api-reference/next-config-js/generateBuildId
 
 
 The previous steps were wrong as it has a poor assumption with how deploy actually works. Deploys are not equivalent to file edits. Deploys actually result in `handleApplication` being re-executed. Moreover, the deploy operation starts by running `prepareApplication`, when an application with that name already exists on the system, it overwrites those files entirely. 
+
+---
+
+- starting from a Fresh Harper Install
+- Deploy `my-app` which uses `nextjs` plugin.
+- Harper deploy operation unpacks and installs `my-app`
+- Then passes it to `loadComponent()`
+- Since `my-app/` nor the `nextjs` plugin are in the `loadedComponents` map yet, everything starts loading
+- The `nextjs` plugin is loaded and `handleApplication()` is called sequentially across threads.
+- One thread must be responsible for building the app (assuming not in `prebuilt` mode or `dev` mode)
+- The first thread to execute `handleApplication()` and detect that a `.next` dir is missing or is invalid (missing `BUILD_ID`) should then build the app and proceed to serving it
+  - What if the user provided a "valid" `.next` dir but didn't specify `prebuilt: true`? We should error.
+- The remaining threads will then execute and as they detect valid `.next` dir, they do not build, and just proceed to serving
+- now app is live across all http thread servers.
+
+- user deploys their app to the running server
+- the `handleApplication()` will **not** execute again because the app and plugin paths have not changed
+- we _could_ detect the file changes and executing the build step, but the pathing is difficult.
+  - Watching everything will break things.
+  - Filtering out node_modules and common test patterns automatically is a reasonable step in the right direction, but hard in practice
+  - Can task user with specifying application files via `files` field but what if they configure it wrong? 
+  - Could parse next config file and determine app files via that? Or like based on Next.js expected things like `app` and `pages` directory ++
+- wether or not we build immediately, the thread **must** be restarted eventually in order to unload the `scope.server.http` handler. 
+- _so_ reasonably, any next deployment must include a restart (either `restart=true` in the deploy or manually after-the-fact)
+- Can we consider automatically restarting for Next.js app deployments?
+  - Understand restarting for _all_ deployments is unnecessary and potentially undesired 
+  - But since Next.js app deployments must restart threads to start working, can we go a step further from `requestRestart`? 
+  - this would improve UX (what if user forgets to include `restart=true` in their deploy command?) (what if they don't notice the restart request?)
+
+- on thread restart, the new app files exist and we can safely work through `.next` directory inspection and build and serving
+
+- user can even change their configuration (enable `prebuilt: true`); as long as they restart!!
