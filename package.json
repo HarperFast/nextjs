@@ -23,10 +23,6 @@
 		"url": "git+https://github.com/HarperFast/nextjs.git"
 	},
 	"license": "Apache-2.0",
-	"bin": {
-		"harperdb-nextjs": "cli.js",
-		"harper-next": "cli.js"
-	},
 	"files": [
 		"config.yaml",
 		"extension.js",

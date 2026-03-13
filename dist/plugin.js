@@ -113,6 +113,7 @@ function getBuildId(scope) {
     }
 }
 export async function handleApplication(scope) {
+    scope.logger.debug?.('appName', scope.appName);
     const config = resolveConfig(scope);
     // scope.logger.debug?.('Config: \n', JSON.stringify(config, undefined, 2))
     if (!assertNextApp(scope)) {
@@ -145,8 +146,22 @@ export async function handleApplication(scope) {
     // 	}, entryHandler);
     // }
     if (config.prebuilt) {
-        if (!existsSync(join(scope.directory, '.next'))) {
+        // TODO: implement record check to skip-over following checks
+        // get record by appName 
+        // - if it exists && within 500ms(?)
+        //   - if success goto serve
+        //   - if failure log and return early
+        //   - if stale ??? (how do we get here?) (maybe with time-based we don't have stale anymore?)
+        // - else continue with below logic
+        //   - if valid, write success record and goto serve
+        //   - if invalid, write failure record and log and return
+        const nextDir = join(scope.directory, '.next');
+        if (!existsSync(nextDir)) {
             scope.logger.error?.('Prebuilt mode is enabled, but the .next folder does not exist');
+            return;
+        }
+        if (!existsSync(join(nextDir, 'BUILD_ID'))) {
+            scope.logger.error?.('Prebuilt mode is enabled, but the .next/BUILD_ID file does not exist');
             return;
         }
         // In prebuilt mode, we still want to ensure the build is valid by checking for a `buildId`.
@@ -155,7 +170,7 @@ export async function handleApplication(scope) {
         // if that is 100% true or if Next.js provides any other guarantees or validation mechanisms.
         const buildId = getBuildId(scope);
         // Immediately set the build info record appropriately
-        await databases.harperfast_nextjs.nextjs_build_info.put(scope.appName, { buildId, status: buildId ? 'success' : 'failure' });
+        await databases.harperfast_nextjs.nextjs_build_info.put(scope.appName, { buildId, status: buildId !== null ? 'success' : 'failure' });
         if (buildId === null) {
             return;
         }
@@ -177,20 +192,28 @@ export async function handleApplication(scope) {
 }
 async function build(scope, config) {
     const buildInfo = await databases.harperfast_nextjs.nextjs_build_info.get(scope.appName);
-    // If the build info record is marked as "failure" just return immediately
-    // avoids building (and failing) on every thread
-    if (buildInfo.status === 'failure') {
-        scope.logger.debug?.(`Failure build of ${scope.appName} detected`);
-        return;
+    const now = Date.now();
+    if (buildInfo) {
+        scope.logger.debug?.('buildInfo', buildInfo);
+        const updatedTime = buildInfo.getUpdatedTime();
+        scope.logger.debug?.('buildInfo.getUpdatedTime()', updatedTime, now, now - updatedTime);
     }
-    // If the build info record is marked as "success"
-    if (buildInfo.status === 'success') {
-        // then validate the BUILD_ID value
-        const buildId = getBuildId(scope);
-        if (buildId === buildInfo.buildId) {
-            scope.logger.debug?.(`Fresh build of ${scope.appName} (id: ${buildInfo.buildId}) detected`);
-            // fresh build
+    if (buildInfo && Date.now() - buildInfo.getUpdatedTime() < 5000) {
+        // If the build info record is marked as "failure" just return immediately
+        // avoids building (and failing) on every thread
+        if (buildInfo.status === 'failure') {
+            scope.logger.debug?.(`Failure build of ${scope.appName} detected`);
             return;
+        }
+        // If the build info record is marked as "success"
+        if (buildInfo.status === 'success') {
+            // then validate the BUILD_ID value
+            const buildId = getBuildId(scope);
+            if (buildId === buildInfo.buildId) {
+                scope.logger.debug?.(`Fresh build of ${scope.appName} (id: ${buildInfo.buildId}) detected`);
+                // fresh build
+                return;
+            }
         }
     }
     // Otherwise we have a stale build and now we can proceed with building
@@ -254,6 +277,7 @@ async function build(scope, config) {
 }
 async function serve(scope, config) {
     const { next, version } = await importNext(scope);
+    scope.logger.debug?.('serving...');
     // scope.logger.debug?.('next version', version);
     // scope.logger.debug?.('typeof next', typeof next);
 }
