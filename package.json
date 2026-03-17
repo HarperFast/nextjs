@@ -2,25 +2,25 @@
 	"name": "@harperdb/nextjs",
 	"version": "1.2.0",
 	"type": "module",
-	"description": "A HarperDB Component for running Next.js apps.",
+	"description": "A Harper extension for running Next.js apps.",
 	"keywords": [
-		"harperdb",
+		"harper",
 		"next.js",
 		"distributed",
 		"applications"
 	],
-	"homepage": "https://github.com/HarperDB/nextjs",
+	"homepage": "https://github.com/HarperFast/nextjs",
 	"bugs": {
-		"url": "https://github.com/HarperDB/nextjs/issues",
+		"url": "https://github.com/HarperFast/nextjs/issues",
 		"email": "support@harperdb.io"
 	},
 	"author": {
-		"name": "HarperDB",
-		"email": "support@harperdb.io"
+		"name": "Harper",
+		"email": "opensource@harperdb.io"
 	},
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/HarperDB/nextjs.git"
+		"url": "git+https://github.com/HarperFast/nextjs.git"
 	},
 	"license": "Apache-2.0",
 	"bin": {
