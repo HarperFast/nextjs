@@ -37,11 +37,7 @@ function assertType(name, option, expectedType) {
 	}
 }
 
-// loggerWithTag is kinda weird as it will set log methods like `.debug()` to `null`
-// based on the configuerd log level. So now all calls to these log methods need to use `?.()`
-// like `extensionLogger.debug?.('whoops!');`.
-// This should be fixed when we migrate to plugin api.
-const extensionLogger = logger.loggerWithTag('@harperdb/nextjs', true);
+const extensionLogger = logger.withTag('@harperdb/nextjs', true);
 
 /**
  * Resolves the incoming extension options into a config for use throughout the extension.
@@ -293,10 +289,11 @@ async function build(config, componentPath, server) {
 				shell: true,
 				cwd: componentPath,
 				stdio: ['ignore', 'pipe', 'pipe'],
+				name: 'nextjs-build',
 			});
 
-			const stdoutLogger = logger.loggerWithTag('@harperdb/nextjs:build:stdout', true);
-			const stderrLogger = logger.loggerWithTag('@harperdb/nextjs:build:stderr', true);
+			const stdoutLogger = logger.withTag('@harperdb/nextjs:build:stdout', true);
+			const stderrLogger = logger.withTag('@harperdb/nextjs:build:stderr', true);
 
 			buildProcess.stdout.on('data', (c) => {
 				stdout.push(c);
@@ -360,8 +357,9 @@ async function build(config, componentPath, server) {
  */
 async function serve(config, componentPath, server) {
 	const componentRequire = createRequire(join(componentPath, 'package.json'));
+	const nextUrl = pathToFileURL(componentRequire.resolve('next'));
 
-	const next = (await import(pathToFileURL(componentRequire.resolve('next')))).default;
+	const next = (await import(nextUrl)).default;
 
 	const app = next({ dir: componentPath, dev: config.dev });
 
