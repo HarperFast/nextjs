@@ -37,10 +37,6 @@ function assertType(name, option, expectedType) {
 	}
 }
 
-// loggerWithTag is kinda weird as it will set log methods like `.debug()` to `null`
-// based on the configuerd log level. So now all calls to these log methods need to use `?.()`
-// like `extensionLogger.debug?.('whoops!');`.
-// This should be fixed when we migrate to plugin api.
 const extensionLogger = logger.withTag('@harperdb/nextjs', true);
 
 /**
