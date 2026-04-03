@@ -12,7 +12,8 @@
 		"resolveJsonModule": true,
 		"isolatedModules": true,
 		"sourceMap": true,
-		"outDir": "dist"
+		"outDir": "dist",
+		"paths": { "next-build": ["./node_modules/next/dist/build/index.d.ts"] }
 	},
 	"include": ["plugin.ts"]
 }

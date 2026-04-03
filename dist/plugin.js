@@ -1,9 +1,7 @@
 import { createRequire } from 'node:module';
-import { pathToFileURL } from 'node:url';
+import { parse as urlParse } from 'node:url';
 import { join } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
 // Bringing this forward from extension since some validation is better than none.
 // Eventually can remove when plugins have better option validation from core.
 /**
@@ -145,6 +143,8 @@ export async function handleApplication(scope) {
     // 		ignore: ['.next/**/*', 'node_modules/**/*']
     // 	}, entryHandler);
     // }
+    const next = await importNext(scope);
+    scope.logger.debug?.('detected Next.js version', next.version);
     if (config.prebuilt) {
         // TODO: implement record check to skip-over following checks
         // get record by appName 
@@ -178,7 +178,7 @@ export async function handleApplication(scope) {
     else if (!config.dev) {
         // If not prebuilt mode and not dev mode, then proceed to building
         try {
-            await build(scope, config);
+            await build(scope, config, next.build);
         }
         catch (error) {
             // if build fails for any reason
@@ -188,9 +188,9 @@ export async function handleApplication(scope) {
             return;
         }
     }
-    await serve(scope, config);
+    await serve(scope, config, next.server);
 }
-async function build(scope, config) {
+async function build(scope, config, nextBuild) {
     const buildInfo = await databases.harperfast_nextjs.nextjs_build_info.get(scope.appName);
     const now = Date.now();
     if (buildInfo) {
@@ -218,50 +218,52 @@ async function build(scope, config) {
     }
     // Otherwise we have a stale build and now we can proceed with building
     scope.logger.info?.(`Building Next.js application at ${scope.directory}`);
-    const stdout = [];
-    const stderr = [];
-    const buildProcess = spawn(config.buildCommand, [], {
-        shell: true,
-        cwd: scope.directory,
-        stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    const stdoutLogger = logger.withTag(`${scope.appName}:build:stdout`);
-    const stderrLogger = logger.withTag(`${scope.appName}:build:stderr`);
-    buildProcess.stdout.on('data', (c) => {
-        stdout.push(c);
-        const chunk = c.toString().trim();
-        chunk.split('\n').forEach((line) => {
-            stdoutLogger.debug?.(line.trim());
-        });
-    });
-    buildProcess.stderr.on('data', (c) => {
-        stderr.push(c);
-        const chunk = c.toString().trim();
-        chunk.split('\n').forEach((line) => {
-            stderrLogger.debug?.(line.trim());
-        });
-    });
-    const [code, signal] = await once(buildProcess, 'close');
+    // const stdout: Buffer[] = [];
+    // const stderr: Buffer[] = [];
+    // const buildProcess = spawn(config.buildCommand, [], {
+    // 	shell: true,
+    // 	cwd: scope.directory,
+    // 	stdio: ['ignore', 'pipe', 'pipe'],
+    // });
+    // const stdoutLogger = logger.withTag(`${scope.appName}:build:stdout`);
+    // const stderrLogger = logger.withTag(`${scope.appName}:build:stderr`);
+    // buildProcess.stdout.on('data', (c: Buffer) => {
+    // 	stdout.push(c);
+    // 	const chunk = c.toString().trim();
+    // 	chunk.split('\n').forEach((line) => {
+    // 		stdoutLogger.debug?.(line.trim());
+    // 	});
+    // });
+    // buildProcess.stderr.on('data', (c: Buffer) => {
+    // 	stderr.push(c);
+    // 	const chunk = c.toString().trim();
+    // 	chunk.split('\n').forEach((line) => {
+    // 		stderrLogger.debug?.(line.trim());
+    // 	});
+    // });
+    // const [code, signal] = await once(buildProcess, 'close');
     // If debug method isn't defined then the debug logs above didn't run (based on log level)
     // So now print out the collected stdout and stderr to info and error respectively.
     // This extension has been logging this out from the beginning so we should maintain that, but
     // we don't need to double up the same logs.
-    if (!scope.logger.debug) {
-        if (stdout.length > 0) {
-            scope.logger.info?.(Buffer.concat(stdout).toString());
-        }
-        if (stderr.length > 0) {
-            scope.logger.error?.(Buffer.concat(stderr).toString());
-        }
-    }
+    // if (!scope.logger.debug) {
+    // 	if (stdout.length > 0) {
+    // 		scope.logger.info?.(Buffer.concat(stdout).toString());
+    // 	}
+    // 	if (stderr.length > 0) {
+    // 		scope.logger.error?.(Buffer.concat(stderr).toString());
+    // 	}
+    // }
     // Any non 0 exit code is considered a failure
-    if (code !== 0) {
-        // Mark build info record as failure and return
-        await databases.harperfast_nextjs.nextjs_build_info.put(scope.appName, { status: 'failure' });
-        // And throw an error to be caught and logged in `handleApplication()`
-        throw new Error(`Build command \`${config.buildCommand}\` exited with code ${code} and signal ${signal}`);
-    }
+    // if (code !== 0) {
+    // 	// Mark build info record as failure and return
+    // 	await databases.harperfast_nextjs.nextjs_build_info.put(scope.appName, { status: 'failure' });
+    // 	// And throw an error to be caught and logged in `handleApplication()`
+    // 	throw new Error(`Build command \`${config.buildCommand}\` exited with code ${code} and signal ${signal}`)
+    // }
     try {
+        // @ts-expect-error
+        await nextBuild(scope.directory);
         const buildIdPath = join(scope.directory, '.next', 'BUILD_ID');
         const buildId = readFileSync(buildIdPath, 'utf-8');
         // Update the build info record
@@ -271,15 +273,41 @@ async function build(scope, config) {
     }
     catch (error) {
         await databases.harperfast_nextjs.nextjs_build_info.put(scope.appName, { buildId: null, status: 'failure' });
-        scope.logger.debug?.(`Error finalizing successful build for ${scope.appName}`);
+        scope.logger.debug?.(`Error building ${scope.appName}`);
         throw error;
     }
 }
-async function serve(scope, config) {
-    const { next, version } = await importNext(scope);
+async function serve(scope, config, nextServer) {
     scope.logger.debug?.('serving...');
-    // scope.logger.debug?.('next version', version);
-    // scope.logger.debug?.('typeof next', typeof next);
+    const app = nextServer({ dir: scope.directory, dev: config.dev });
+    await app.prepare();
+    const requestHandler = app.getRequestHandler();
+    scope.server.http?.((request, next) => {
+        // @ts-expect-error
+        return request._nodeResponse === undefined
+            ? next(request)
+            // @ts-expect-error
+            : requestHandler(request._nodeRequest, request._nodeResponse, urlParse(request._nodeRequest.url, true));
+    }, 
+    // @ts-expect-error
+    { runFirst: config.runFirst, port: config.port, securePort: config.securePort });
+    // Next.js v9 doesn't have an upgrade handler
+    if (config.dev && app.getUpgradeHandler) {
+        const upgradeHandler = app.getUpgradeHandler();
+        // @ts-expect-error
+        scope.server.upgrade(
+        // @ts-expect-error
+        (request, socket, head, next) => {
+            if (request.url === '/_next/webpack-hmr') {
+                // Next.js v13 - v15 upgradeHandler implementations return promises
+                return upgradeHandler(request, socket, head).then(() => {
+                    request.__harperdbRequestUpgraded = true;
+                    return next(request, socket, head);
+                });
+            }
+            return next(request, socket, head);
+        }, { runFirst: true, port: config.port, securePort: config.securePort });
+    }
 }
 function detectNextVersion(scope) {
     const require = createRequire(join(scope.directory, 'package.json'));
@@ -288,9 +316,10 @@ function detectNextVersion(scope) {
 }
 async function importNext(scope) {
     const require = createRequire(join(scope.directory, 'package.json'));
-    const nextPath = pathToFileURL(require.resolve('next'));
-    const nextModule = await import(nextPath.href);
-    const next = nextModule.default;
-    return { next, version: detectNextVersion(scope) };
+    // The default export is the `createServer` function
+    const server = require(require.resolve('next'));
+    // The build module's default export is the actual `build` function
+    const build = require(require.resolve('next/dist/build/index.js')).default;
+    return { server, build, version: detectNextVersion(scope) };
 }
 //# sourceMappingURL=plugin.js.map
