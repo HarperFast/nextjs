@@ -1,4 +1,4 @@
-import type { Scope, Config, FilesOption } from 'harperdb';
+import type { Scope, Config, FilesOption } from 'harper';
 import { createRequire } from 'node:module';
 import { parse as urlParse } from 'node:url';
 import { join } from 'node:path';

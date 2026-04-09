@@ -1,5 +1,5 @@
 export const metadata = {
-	title: 'HarperDB - Next.js v13 App',
+	title: 'Harper - Next.js v13 App',
 };
 
 export default function RootLayout({ children }) {

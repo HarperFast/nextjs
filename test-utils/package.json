@@ -1,8 +1,0 @@
-{
-	"name": "test-utils",
-	"private": true,
-	"files": [
-		"global-setup.js",
-		"global-teardown.js"
-	]
-}
