@@ -1,6 +1,5 @@
 import { test as base, type WorkerInfo } from '@playwright/test';
 import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import {
 	createHarperContext,
@@ -9,15 +8,14 @@ import {
 	type HarperContext,
 } from '@harperfast/integration-testing-framework';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 
 /**
  * Resolve the harperdb v4 CLI binary from this package's node_modules.
  */
-function getHarperdbBinPath(): string {
-	const harperdbMain = require.resolve('harperdb');
-	return join(dirname(harperdbMain), 'bin', 'harperdb.js');
+function getHarperBinPath(): string {
+	const harperMain = require.resolve('harper');
+	return join(dirname(harperMain), 'bin', 'harper.js');
 }
 
 // Next.js build can take a while — give it 2 minutes.
@@ -40,11 +38,11 @@ export type HarperFixtures = {
  */
 function makeHarperFixture(fixtureName: string) {
 	return async ({ }: {}, use: (harper: HarperContext) => Promise<void>, workerInfo: WorkerInfo) => {
-		const fixturePath = join(__dirname, '..', 'fixtures', fixtureName);
-		const ctx = createHarperContext(`${fixtureName}-worker-${workerInfo.workerIndex}`);
+		const fixturePath = join(import.meta.dirname, '..', 'fixtures', fixtureName);
+		const ctx = createHarperContext(fixtureName);
 
 		const started = await setupHarperWithFixture(ctx, fixturePath, {
-			harperBinPath: getHarperdbBinPath(),
+			harperBinPath: getHarperBinPath(),
 			startupTimeoutMs: STARTUP_TIMEOUT_MS,
 		});
 
@@ -68,7 +66,7 @@ function makeHarperFixture(fixtureName: string) {
  * ```
  */
 export const test = base.extend<HarperFixtures>({
-	harper: [makeHarperFixture('next-15'), { scope: 'worker', timeout: STARTUP_TIMEOUT_MS }],
+	harper: [makeHarperFixture('next-15'), { timeout: STARTUP_TIMEOUT_MS }],
 });
 
 export { expect } from '@playwright/test';
