@@ -33,7 +33,8 @@
 		"format:check": "npm run format -- --check",
 		"format:fix": "npm run format -- --write",
 		"lint": "eslint .",
-		"build": "tsc"
+		"build": "tsc",
+		"test:integration": "harper-integration-test-run \"integrationTests/**/*.test.ts\""
 	},
 	"engines": {
 		"node": "22"
@@ -45,6 +46,7 @@
 		}
 	},
 	"devDependencies": {
+		"@harperfast/integration-testing-framework": "*",
 		"@eslint/js": "9.17.0",
 		"@harperdb/code-guidelines": "0.0.6",
 		"@types/node": "22.19.11",
