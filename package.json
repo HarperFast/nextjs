@@ -34,7 +34,7 @@
 		"format:fix": "npm run format -- --write",
 		"lint": "eslint .",
 		"build": "tsc",
-		"test:integration": "harper-integration-test-run \"integrationTests/**/*.test.ts\""
+		"test:integration": "playwright test --config integrationTests/playwright.config.ts"
 	},
 	"engines": {
 		"node": "22"
@@ -46,7 +46,8 @@
 		}
 	},
 	"devDependencies": {
-		"@harperfast/integration-testing-framework": "*",
+		"@harperfast/integration-testing-framework": "file:../integration-testing-framework",
+		"@playwright/test": "^1.52.0",
 		"@eslint/js": "9.17.0",
 		"@harperdb/code-guidelines": "0.0.6",
 		"@types/node": "22.19.11",
