@@ -1,0 +1,22 @@
+{
+	"name": "next-14",
+	"private": true,
+	"scripts": {
+		"dev": "harperdb-nextjs dev",
+		"build": "harperdb-nextjs build",
+		"start": "harperdb-nextjs start",
+		"lint": "next lint",
+		"postinstall": "npm link harperdb && npx playwright install chromium",
+		"test": "playwright test"
+	},
+	"dependencies": {
+		"@harperdb/nextjs": "file:../../",
+		"next": "^14",
+		"react": "^18",
+		"react-dom": "^18"
+	},
+	"devDependencies": {
+		"@playwright/test": "^1.49.0",
+		"test-utils": "file:../../test-utils/"
+	}
+}
