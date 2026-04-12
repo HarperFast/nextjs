@@ -2,9 +2,9 @@
 	"extends": "../tsconfig.json",
 	"include": ["./**/*"],
 	"compilerOptions": {
-		"outDir": null,
-		"noEmit": true,
-		"allowImportingTsExtensions": true,
-		"erasableSyntaxOnly": true
+		// This is really only here from VSCode TypeScript intellisense
+		// Type checking passes without it, but however the typescript server is set up
+		// in vscode has issues without it.
+		"types": ["node"]
 	}
 }

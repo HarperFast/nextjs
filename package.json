@@ -46,10 +46,10 @@
 		}
 	},
 	"devDependencies": {
-		"@harperfast/integration-testing-framework": "file:../integration-testing-framework",
-		"@playwright/test": "^1.52.0",
 		"@eslint/js": "9.17.0",
 		"@harperdb/code-guidelines": "0.0.6",
+		"@harperfast/integration-testing": "0.2.0",
+		"@playwright/test": "1.52.0",
 		"@types/node": "22.19.11",
 		"eslint": "9.17.0",
 		"globals": "15.14.0",

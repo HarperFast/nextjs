@@ -1,9 +1,6 @@
-import { makeHarperFixture } from "./makeHarperFixture.ts";
-import { test as base, expect } from "@playwright/test";
+import { fixture } from "./fixture.ts";
 
-const test = base.extend({
-	harper: [makeHarperFixture('next-13'), { scope: 'worker', timeout: 120_000 }]
-})
+const { test, expect } = fixture('next-13');
 
 test('home page renders', async ({ page, harper }) => {
 	await page.goto(harper.httpURL);
@@ -13,4 +10,9 @@ test('home page renders', async ({ page, harper }) => {
 test('page title is set', async ({ page, harper }) => {
 	await page.goto(harper.httpURL);
 	await expect(page).toHaveTitle('Harper - Next.js v13 App');
+});
+
+test('status endpoint returns 200', async ({ request, harper }) => {
+	const response = await request.get(`${harper.operationsAPIURL}/health`);
+	expect(response.status()).toBe(200);
 });

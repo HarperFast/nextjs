@@ -348,32 +348,26 @@ async function serve(scope: Scope, config: NextPluginConfig, nextServer: NextSer
 	
 	const requestHandler = app.getRequestHandler();
 
-	scope.server.http?.(
+	scope.server?.http?.(
 		(request, next) => {
-			// @ts-expect-error
 			return request._nodeResponse === undefined
 				? next(request)
 				// @ts-expect-error
 				: requestHandler(request._nodeRequest, request._nodeResponse, urlParse(request._nodeRequest.url, true));
 		},
-		// @ts-expect-error
 		{ runFirst: config.runFirst, port: config.port, securePort: config.securePort }
 	);
 
 	// Next.js v9 doesn't have an upgrade handler
 	if (config.dev && app.getUpgradeHandler) {
 		const upgradeHandler = app.getUpgradeHandler();
-		// @ts-expect-error
-		scope.server.upgrade(
-			// @ts-expect-error
-			(request, socket, head, next) => {
+		scope.server?.upgrade?.(
+			async (request, socket, head, next) => {
 				if (request.url === '/_next/webpack-hmr') {
-					// Next.js v13 - v15 upgradeHandler implementations return promises
-					return upgradeHandler(request, socket, head).then(() => {
-						request.__harperdbRequestUpgraded = true;
-
-						return next(request, socket, head);
-					});
+					// Next.js v13+ upgradeHandler implementations return promises
+					await upgradeHandler(request._nodeRequest, socket, head);
+					request.__harperRequestUpgraded = true;
+					return await next(request, socket, head);
 				}
 
 				return next(request, socket, head);

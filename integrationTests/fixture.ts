@@ -5,7 +5,8 @@ import {
 	setupHarperWithFixture,
 	teardownHarper,
 	type HarperContext,
-} from '@harperfast/integration-testing-framework';
+} from '@harperfast/integration-testing';
+import { test as base, expect } from '@playwright/test';
 
 const require = createRequire(import.meta.url);
 
@@ -30,4 +31,11 @@ export function makeHarperFixture(fixtureName: string) {
 
 		await teardownHarper(started);
 	};
+}
+
+export function fixture(fixtureName: string) {
+	const test = base.extend<{}, { harper: HarperContext }>({
+		harper: [makeHarperFixture(fixtureName), { scope: 'worker', timeout: 120_000 }]
+	});
+	return { test, expect };
 }
