@@ -1,5 +1,5 @@
 {
-	"include": ["plugin.ts"],
+	"include": ["src/**/*.ts"],
 	"compilerOptions": {
 		// Type checking only by default; use `tsconfig.build.json` for emitting
 		"noEmit": true,
@@ -18,8 +18,5 @@
 		"erasableSyntaxOnly": true,
 		"verbatimModuleSyntax": true,
 		"allowImportingTsExtensions": true,
-
-		// Custom support for embedded Next.js types
-		"paths": { "next-build": ["./node_modules/next/dist/build/index.d.ts"] }
 	},
 }

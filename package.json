@@ -28,13 +28,19 @@
 		"config.yaml",
 		"schema.graphql"
 	],
+	"exports": {
+		".": {
+			"import": "./dist/index.js",
+			"types": "./dist/index.d.ts"
+		}
+	},
 	"scripts": {
 		"format": "prettier .",
 		"format:check": "npm run format -- --check",
 		"format:fix": "npm run format -- --write",
 		"lint": "eslint .",
 		"build": "tsc -p tsconfig.build.json",
-		"test:integration": "playwright test --config integrationTests/playwright.config.ts"
+		"test:integration": "HARPER_INTEGRATION_TEST_LOG_DIR=test-results/harper-logs playwright test --config integrationTests/playwright.config.ts"
 	},
 	"engines": {
 		"node": ">=20"

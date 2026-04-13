@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { parse as urlParse } from 'node:url';
 import { join } from 'node:path';
 import type NextModule from 'next';
-import type NextBuildModule from 'next-build';
+import type NextBuildModule from 'next/dist/build/index.d.ts';
 import { existsSync, readFileSync } from 'node:fs';
 
 type NextServer = typeof NextModule.default;

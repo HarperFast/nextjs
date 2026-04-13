@@ -17,17 +17,11 @@ function assertType(name, option, expectedType) {
  */
 function resolveConfig(scope) {
     const options = scope.options.getAll();
-    // Todo; what if no options specified? Is that `null` or `undefined`? How does yaml parser handle that?
-    // In theory this plugin could work with 0 config... assuming we allow that?
-    // ```yaml
-    // '@harperfast/next':
-    //   package: '@harperfast/next'
-    // ```
     if (options === null || Array.isArray(options) || typeof options !== 'object') {
-        throw new Error('@harperfast/next plugin options should be a regular object');
+        throw new Error('@harperfast/nextjs plugin options should be a regular object');
     }
     // Environment Variables take precedence
-    switch (process.env.HARPERDB_NEXTJS_MODE) {
+    switch (process.env.HARPER_NEXTJS_MODE) {
         case 'dev':
             options.dev = true;
             break;
@@ -42,7 +36,6 @@ function resolveConfig(scope) {
         default:
             break;
     }
-    assertType('buildCommand', options.buildCommand, 'string');
     assertType('buildOnly', options.buildOnly, 'boolean');
     assertType('dev', options.dev, 'boolean');
     assertType('port', options.port, 'number');
@@ -51,7 +44,6 @@ function resolveConfig(scope) {
     assertType('securePort', options.securePort, 'number');
     // TODO: Remove type casts when we have more proper plugin option validation from core
     return {
-        buildCommand: options.buildCommand ?? 'npx next build',
         buildOnly: options.buildOnly ?? false,
         dev: options.dev ?? false,
         // @ts-expect-error
@@ -111,9 +103,8 @@ function getBuildId(scope) {
     }
 }
 export async function handleApplication(scope) {
-    scope.logger.debug?.('appName', scope.appName);
+    scope.logger.debug?.(`Handling Next.js Application ${scope.appName} as ${scope.directory}`);
     const config = resolveConfig(scope);
-    // scope.logger.debug?.('Config: \n', JSON.stringify(config, undefined, 2))
     if (!assertNextApp(scope)) {
         return;
     }
@@ -143,8 +134,8 @@ export async function handleApplication(scope) {
     // 		ignore: ['.next/**/*', 'node_modules/**/*']
     // 	}, entryHandler);
     // }
-    const next = await importNext(scope);
-    scope.logger.debug?.('detected Next.js version', next.version);
+    const next = importNext(scope);
+    scope.logger.debug?.(`Detected Next.js version: ${next.version}`);
     if (config.prebuilt) {
         // TODO: implement record check to skip-over following checks
         // get record by appName 
@@ -179,6 +170,11 @@ export async function handleApplication(scope) {
         // If not prebuilt mode and not dev mode, then proceed to building
         try {
             await build(scope, config, next.build);
+            if (config.buildOnly) {
+                scope.logger.info?.('buildOnly mode is enabled, exiting');
+                // todo: should harper expose a like `scope.shutdown()` method or something that "safely" exits?
+                process.exit(0);
+            }
         }
         catch (error) {
             // if build fails for any reason
@@ -188,16 +184,11 @@ export async function handleApplication(scope) {
             return;
         }
     }
+    // Finally, serve the application
     await serve(scope, config, next.server);
 }
 async function build(scope, config, nextBuild) {
     const buildInfo = await databases.harperfast_nextjs.nextjs_build_info.get(scope.appName);
-    const now = Date.now();
-    if (buildInfo) {
-        scope.logger.debug?.('buildInfo', buildInfo);
-        const updatedTime = buildInfo.getUpdatedTime();
-        scope.logger.debug?.('buildInfo.getUpdatedTime()', updatedTime, now, now - updatedTime);
-    }
     if (buildInfo && Date.now() - buildInfo.getUpdatedTime() < 5000) {
         // If the build info record is marked as "failure" just return immediately
         // avoids building (and failing) on every thread
@@ -216,53 +207,13 @@ async function build(scope, config, nextBuild) {
             }
         }
     }
-    // Otherwise we have a stale build and now we can proceed with building
-    scope.logger.info?.(`Building Next.js application at ${scope.directory}`);
-    // const stdout: Buffer[] = [];
-    // const stderr: Buffer[] = [];
-    // const buildProcess = spawn(config.buildCommand, [], {
-    // 	shell: true,
-    // 	cwd: scope.directory,
-    // 	stdio: ['ignore', 'pipe', 'pipe'],
-    // });
-    // const stdoutLogger = logger.withTag(`${scope.appName}:build:stdout`);
-    // const stderrLogger = logger.withTag(`${scope.appName}:build:stderr`);
-    // buildProcess.stdout.on('data', (c: Buffer) => {
-    // 	stdout.push(c);
-    // 	const chunk = c.toString().trim();
-    // 	chunk.split('\n').forEach((line) => {
-    // 		stdoutLogger.debug?.(line.trim());
-    // 	});
-    // });
-    // buildProcess.stderr.on('data', (c: Buffer) => {
-    // 	stderr.push(c);
-    // 	const chunk = c.toString().trim();
-    // 	chunk.split('\n').forEach((line) => {
-    // 		stderrLogger.debug?.(line.trim());
-    // 	});
-    // });
-    // const [code, signal] = await once(buildProcess, 'close');
-    // If debug method isn't defined then the debug logs above didn't run (based on log level)
-    // So now print out the collected stdout and stderr to info and error respectively.
-    // This extension has been logging this out from the beginning so we should maintain that, but
-    // we don't need to double up the same logs.
-    // if (!scope.logger.debug) {
-    // 	if (stdout.length > 0) {
-    // 		scope.logger.info?.(Buffer.concat(stdout).toString());
-    // 	}
-    // 	if (stderr.length > 0) {
-    // 		scope.logger.error?.(Buffer.concat(stderr).toString());
-    // 	}
-    // }
-    // Any non 0 exit code is considered a failure
-    // if (code !== 0) {
-    // 	// Mark build info record as failure and return
-    // 	await databases.harperfast_nextjs.nextjs_build_info.put(scope.appName, { status: 'failure' });
-    // 	// And throw an error to be caught and logged in `handleApplication()`
-    // 	throw new Error(`Build command \`${config.buildCommand}\` exited with code ${code} and signal ${signal}`)
-    // }
+    // Otherwise we have a stale build (or no build info at all) and now we can proceed with building
+    scope.logger.debug?.(`Building Next.js application at ${scope.directory}`);
     try {
-        // @ts-expect-error
+        // @ts-expect-error - Next.js is weird. I do believe these arguments are all optional except for the directory
+        // (and even that one might default to the cwd), but they are all typed as `| undefined` and TS doesn't let us
+        // _not_ define them even if its equivalent. May also be caused by the 9th argument which is not marked as optional
+        // but does have a default value? Not sure.
         await nextBuild(scope.directory);
         const buildIdPath = join(scope.directory, '.next', 'BUILD_ID');
         const buildId = readFileSync(buildIdPath, 'utf-8');
@@ -278,48 +229,39 @@ async function build(scope, config, nextBuild) {
     }
 }
 async function serve(scope, config, nextServer) {
-    scope.logger.debug?.('serving...');
+    scope.logger.debug?.(`Serving Next.js application at ${scope.directory}`);
     const app = nextServer({ dir: scope.directory, dev: config.dev });
     await app.prepare();
     const requestHandler = app.getRequestHandler();
-    scope.server.http?.((request, next) => {
-        // @ts-expect-error
+    scope.server?.http?.((request, next) => {
         return request._nodeResponse === undefined
             ? next(request)
-            // @ts-expect-error
+            // @ts-expect-error - Not sure when the IncomingMessage.url could be undefined ; need to dig into it.
             : requestHandler(request._nodeRequest, request._nodeResponse, urlParse(request._nodeRequest.url, true));
-    }, 
-    // @ts-expect-error
-    { runFirst: config.runFirst, port: config.port, securePort: config.securePort });
-    // Next.js v9 doesn't have an upgrade handler
+    }, { runFirst: config.runFirst, port: config.port, securePort: config.securePort });
+    // Early Next.js versions don't have an upgrade handler
     if (config.dev && app.getUpgradeHandler) {
         const upgradeHandler = app.getUpgradeHandler();
-        // @ts-expect-error
-        scope.server.upgrade(
-        // @ts-expect-error
-        (request, socket, head, next) => {
+        scope.server?.upgrade?.(async (request, socket, head, next) => {
             if (request.url === '/_next/webpack-hmr') {
-                // Next.js v13 - v15 upgradeHandler implementations return promises
-                return upgradeHandler(request, socket, head).then(() => {
-                    request.__harperdbRequestUpgraded = true;
-                    return next(request, socket, head);
-                });
+                // Next.js v13+ upgradeHandler implementations return promises
+                await upgradeHandler(request._nodeRequest, socket, head);
+                request.__harperRequestUpgraded = true;
+                return await next(request, socket, head);
             }
             return next(request, socket, head);
-        }, { runFirst: true, port: config.port, securePort: config.securePort });
+        }, 
+        // Okay to set `runFirst: true` here since this has a strict match on `/_next/webpack-hmr`
+        { runFirst: true, port: config.port, securePort: config.securePort });
     }
 }
-function detectNextVersion(scope) {
+function importNext(scope) {
     const require = createRequire(join(scope.directory, 'package.json'));
     const nextPackage = require('next/package.json');
-    return parseInt(nextPackage.version.split('.')[0], 10);
-}
-async function importNext(scope) {
-    const require = createRequire(join(scope.directory, 'package.json'));
     // The default export is the `createServer` function
-    const server = require(require.resolve('next'));
+    const server = require('next');
     // The build module's default export is the actual `build` function
-    const build = require(require.resolve('next/dist/build/index.js')).default;
-    return { server, build, version: detectNextVersion(scope) };
+    const build = require('next/dist/build/index.js').default;
+    return { server, build, version: parseInt(nextPackage.version.split('.')[0], 10) };
 }
 //# sourceMappingURL=plugin.js.map
