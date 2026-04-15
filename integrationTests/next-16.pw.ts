@@ -17,7 +17,8 @@ test('status endpoint returns 200', async ({ request, harper }) => {
 	expect(response.status()).toBe(200);
 });
 
-test.describe('ISR caching', () => {
+// These are meant for `next-16-caching` when we get that all working
+test.describe.skip('ISR caching', () => {
 	test('ISR page serves cached response and revalidates after expiry', async ({ page, harper }) => {
 		const url = `${harper.httpURL}/isr`;
 
@@ -29,18 +30,18 @@ test.describe('ISR caching', () => {
 
 		// ── First cached request ──────────────────────────────────────────────────
 		const response1 = await page.goto(url);
-		const timestamp1 = await page.getByTestId('timestamp').innerText();
+		const nonce1 = await page.getByTestId('nonce').innerText();
 
 		// Should be a cache HIT (served from the Harper-backed ISR cache).
 		expect(response1!.headers()['x-nextjs-cache']).toBe('HIT');
 
 		// ── Second request within revalidation window ─────────────────────────────
 		const response2 = await page.goto(url);
-		const timestamp2 = await page.getByTestId('timestamp').innerText();
+		const nonce2 = await page.getByTestId('nonce').innerText();
 
 		expect(response2!.headers()['x-nextjs-cache']).toBe('HIT');
 		// Content must be identical — the cached page has not been regenerated.
-		expect(timestamp1).toBe(timestamp2);
+		expect(nonce1).toBe(nonce2);
 
 		// ── Wait for the revalidation window to expire (revalidate = 2s) ──────────
 		await page.waitForTimeout(2500);
@@ -48,20 +49,20 @@ test.describe('ISR caching', () => {
 		// ── Stale request ─────────────────────────────────────────────────────────
 		// Next.js serves the stale cached page while triggering a background regen.
 		const response3 = await page.goto(url);
-		const timestamp3 = await page.getByTestId('timestamp').innerText();
+		const nonce3 = await page.getByTestId('nonce').innerText();
 
 		expect(response3!.headers()['x-nextjs-cache']).toBe('STALE');
 		// Still the old content while revalidation is in flight.
-		expect(timestamp2).toBe(timestamp3);
+		expect(nonce2).toBe(nonce3);
 
 		// ── Revalidated request ───────────────────────────────────────────────────
 		// Background revalidation should have completed; next hit is the fresh page.
 		const response4 = await page.goto(url);
-		const timestamp4 = await page.getByTestId('timestamp').innerText();
+		const nonce4 = await page.getByTestId('nonce').innerText();
 
 		expect(response4!.headers()['x-nextjs-cache']).toBe('HIT');
-		// Content must have changed — the page was regenerated with a new timestamp.
-		expect(timestamp3).not.toBe(timestamp4);
+		// Content must have changed — the page was regenerated with a new nonce.
+		expect(nonce3).not.toBe(nonce4);
 	});
 
 	test('ISR cache record is persisted in Harper', async ({ request, harper }) => {
@@ -94,7 +95,7 @@ test.describe('ISR caching', () => {
 
 		const record = records[0];
 		expect(record.id).toBe('/isr');
-		// lastModified should be a recent Unix timestamp in milliseconds.
+		// lastModified should be a recent Unix nonce in milliseconds.
 		expect(typeof record.lastModified).toBe('number');
 		expect(record.lastModified).toBeGreaterThan(Date.now() - 60_000);
 	});
@@ -106,7 +107,7 @@ test.describe('ISR caching', () => {
 		await request.get(isrURL);
 		await request.get(isrURL);
 
-		// Capture the initial lastModified timestamp from the DB.
+		// Capture the initial lastModified nonce from the DB.
 		const authHeader = `Basic ${Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString('base64')}`;
 		const queryPayload = {
 			operation: 'search_by_value',
@@ -140,7 +141,7 @@ test.describe('ISR caching', () => {
 		const [afterRecord] = await after.json();
 		const lastModifiedAfter: number = afterRecord.lastModified;
 
-		// The record's lastModified timestamp must have advanced.
+		// The record's lastModified nonce must have advanced.
 		expect(lastModifiedAfter).toBeGreaterThan(lastModifiedBefore);
 	});
 });

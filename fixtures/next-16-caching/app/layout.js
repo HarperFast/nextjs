@@ -1,5 +1,5 @@
 export const metadata = {
-	title: 'Harper - Next.js v13 App',
+	title: 'Harper - Next.js v16 App',
 };
 
 export default function RootLayout({ children }) {

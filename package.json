@@ -40,7 +40,7 @@
 		"format:fix": "npm run format -- --write",
 		"lint": "eslint .",
 		"build": "tsc -p tsconfig.build.json",
-		"test:integration": "HARPER_INTEGRATION_TEST_LOG_DIR=test-results/harper-logs playwright test --config integrationTests/playwright.config.ts"
+		"test:integration": "playwright test --config integrationTests/playwright.config.ts"
 	},
 	"engines": {
 		"node": ">=20"
@@ -60,12 +60,14 @@
 		"eslint": "9.17.0",
 		"globals": "15.14.0",
 		"harper": "5.0.0",
-		"next": "15.5.12",
+		"next-14": "npm:next@14.2.35",
+		"next-15": "npm:next@15.5.12",
+		"next-16": "npm:next@16.2.3",
 		"prettier": "3.4.2",
 		"typescript": "5.9.3"
 	},
 	"peerDependencies": {
-		"next": "^15.5.12 || ^16.1.6"
+		"next": "^14 || ^15 || ^16"
 	},
 	"peerDependenciesMeta": {
 		"next": {

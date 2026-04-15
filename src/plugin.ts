@@ -1,13 +1,20 @@
 import type { Scope, Config, FilesOption } from 'harper';
+
 import { createRequire } from 'node:module';
 import { parse as urlParse } from 'node:url';
 import { join } from 'node:path';
-import type NextModule from 'next';
-import type NextBuildModule from 'next/dist/build/index.d.ts';
 import { existsSync, readFileSync } from 'node:fs';
 
-type NextServer = typeof NextModule.default;
-type NextBuild = typeof NextBuildModule.default;
+
+import type NextModule14 from 'next-14';
+import type NextBuildModule14 from 'next-14/dist/cli/next-build.d.ts';
+
+import type NextModule15 from 'next-15';
+import type NextBuildModule15 from 'next-15/dist/cli/next-build.d.ts';
+
+import type NextModule16 from 'next-16';
+import type NextBuildModule16 from 'next-16/dist/cli/next-build.d.ts';
+
 
 interface NextPluginConfig extends Config {
 	buildOnly: boolean;
@@ -140,6 +147,7 @@ export async function handleApplication(scope: Scope) {
 	scope.logger.debug?.(`Handling Next.js Application ${scope.appName} as ${scope.directory}`);
 	const config = resolveConfig(scope);
 
+	// TODO: delegate this to the Next.js build/server functions instead.
 	if (!assertNextApp(scope)) {
 		return;
 	}
@@ -216,11 +224,12 @@ export async function handleApplication(scope: Scope) {
 	} else if (!config.dev) {
 		// If not prebuilt mode and not dev mode, then proceed to building
 		try {
-			await build(scope, config, next.build);
+			await build(scope, config, next);
 
+			// In build only we can exit and return early here.
 			if (config.buildOnly) {
 				scope.logger.info?.('buildOnly mode is enabled, exiting');
-				// todo: should harper expose a like `scope.shutdown()` method or something that "safely" exits?
+				// TODO: should harper expose a like `scope.shutdown()` method or something that "safely" exits?
 				process.exit(0);
 			}
 		} catch (error) {
@@ -233,10 +242,10 @@ export async function handleApplication(scope: Scope) {
 	}
 
 	// Finally, serve the application
-	await serve(scope, config, next.server);
+	await serve(scope, config, next);
 }
 
-async function build(scope: Scope, config: NextPluginConfig, nextBuild: NextBuild) {
+async function build(scope: Scope, config: NextPluginConfig, next: NextPackage) {
 	const buildInfo = await databases.harperfast_nextjs.nextjs_build_info.get(scope.appName);
 
 	if (buildInfo && Date.now() - buildInfo.getUpdatedTime() < 5000) {
@@ -264,12 +273,33 @@ async function build(scope: Scope, config: NextPluginConfig, nextBuild: NextBuil
 	scope.logger.debug?.(`Building Next.js application at ${scope.directory}`);
 
 	try {
-
-		// @ts-expect-error - Next.js is weird. I do believe these arguments are all optional except for the directory
-		// (and even that one might default to the cwd), but they are all typed as `| undefined` and TS doesn't let us
-		// _not_ define them even if its equivalent. May also be caused by the 9th argument which is not marked as optional
-		// but does have a default value? Not sure.
-		await nextBuild(scope.directory);
+		switch (next.version) {
+			case 14:
+				await next.build({
+					lint: false,
+					mangling: true,
+					experimentalDebugMemoryUsage: false,
+					experimentalBuildMode: 'default',
+				}, scope.directory);
+				break;
+			case 15:
+				await next.build({
+					lint: false,
+					mangling: true,
+					turbopack: false,
+					experimentalDebugMemoryUsage: false,
+					experimentalBuildMode: 'default',
+				}, scope.directory);
+				break;
+			case 16:
+				await next.build({
+					mangling: true,
+					webpack: true,
+					experimentalDebugMemoryUsage: false,
+					experimentalBuildMode: 'default',
+				}, scope.directory);
+				break;
+		}
 
 		const buildIdPath = join(scope.directory, '.next', 'BUILD_ID');
 		const buildId = readFileSync(buildIdPath, 'utf-8');
@@ -284,10 +314,23 @@ async function build(scope: Scope, config: NextPluginConfig, nextBuild: NextBuil
 	}
 }
 
-async function serve(scope: Scope, config: NextPluginConfig, nextServer: NextServer) {
+
+
+async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) {
 	scope.logger.debug?.(`Serving Next.js application at ${scope.directory}`);
 
-	const app = nextServer({ dir: scope.directory, dev: config.dev });
+	let app;
+	switch (next.version) {
+		case 14:
+			app = next.server({ dir: scope.directory, dev: config.dev });
+			break;
+		case 15:
+			app = next.server({ dir: scope.directory, dev: config.dev, turbopack: false });
+			break;
+		case 16:
+			app = next.server({ dir: scope.directory, dev: config.dev, turbopack: false });
+			break;
+	}
 
 	await app.prepare();
 	
@@ -323,12 +366,37 @@ async function serve(scope: Scope, config: NextPluginConfig, nextServer: NextSer
 	}
 }
 
-function importNext(scope: Scope): { server: NextServer, build: NextBuild, version: number } {
+interface Next14 {
+	version: 14;
+	server: typeof NextModule14.default;
+	build: typeof NextBuildModule14.nextBuild;
+}
+
+interface Next15 {
+	version: 15;
+	server: typeof NextModule15.default;
+	build: typeof NextBuildModule15.nextBuild;
+}
+
+interface Next16 {
+	version: 16;
+	server: typeof NextModule16.default;
+	build: typeof NextBuildModule16.nextBuild;
+}
+
+type NextPackage = Next14 | Next15 | Next16;
+
+// This function imports the Next.js version specified by the application
+function importNext(scope: Scope): NextPackage {
   const require = createRequire(join(scope.directory, 'package.json'));
   const nextPackage = require('next/package.json');
+  const version = parseInt(nextPackage.version.split('.')[0], 10);
+  if (version !== 14 && version !== 15 && version !== 16) {
+	throw new Error(`Unsupported Next.js version detected: ${nextPackage.version}. The \`@harperfast/nextjs\` plugin only supports Next.js versions: 14, 15, 16`);
+  }
   // The default export is the `createServer` function
   const server = require('next');
-  // The build module's default export is the actual `build` function
-  const build = require('next/dist/build/index.js').default;
-  return { server, build, version: parseInt(nextPackage.version.split('.')[0], 10) };
+  // Use the `nextBuild` method
+  const build = require('next/dist/cli/next-build.js').nextBuild;
+  return { server, build, version };
 }

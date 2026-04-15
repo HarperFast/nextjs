@@ -15,14 +15,12 @@ export default defineConfig({
 	// Retry on CI to smooth over flakiness in Next.js startup timing
 	retries: process.env.CI ? 1 : 0,
 
-	reporter: process.env.CI ? 'github' : [['list'], ['html', { open: 'never' }]],
+	reporter: process.env.CI ? 'github' : 'list',
 
 	use: {
 		// No baseURL — each test uses harper.httpURL from the fixture directly,
 		// since different workers are on different loopback addresses.
 		trace: 'retain-on-failure',
-		screenshot: 'only-on-failure',
-		video: 'retain-on-failure',
 	},
 
 	projects: [

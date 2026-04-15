@@ -8,6 +8,8 @@ import type {
 	SetIncrementalResponseCacheContext,
 } from 'next/dist/server/response-cache/index.d.ts';
 
+import { databases } from 'harper';
+
 /**
  * Serialize a cache value to a JSON string, handling non-serializable types.
  *
@@ -76,7 +78,6 @@ export default class HarperCacheHandler implements CacheHandler {
 		const table = databases.harperfast_nextjs.nextjs_isr_cache;
 		await table.put(key, {
 			data: serialize(data),
-			lastModified: Date.now(),
 		});
 	}
 

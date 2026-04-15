@@ -25,6 +25,13 @@ export function makeHarperFixture(fixtureName: string) {
 		const started = await setupHarperWithFixture(ctx, fixturePath, {
 			harperBinPath: getHarperBinPath(),
 			startupTimeoutMs: STARTUP_TIMEOUT_MS,
+			config: {
+				application: {
+					lockdown: 'none',
+					moduleLoader: 'none',
+					dependencyLoadaer: 'native'
+				}
+			}
 		});
 
 		await use(started.harper);
