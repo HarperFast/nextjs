@@ -1,6 +1,6 @@
 # @harperdb/nextjs
 
-A [HarperDB Component](https://docs.harperdb.io/docs/developers/components) for running and developing Next.js apps.
+A [Harper Extension](https://docs.harperdb.io/docs/reference/components/extensions) for running and developing Next.js apps.
 
 ![NPM Version](https://img.shields.io/npm/v/%40harperdb%2Fnextjs)
 
@@ -12,7 +12,7 @@ Most Next.js features are supported as we rely on the Next.js Server provided by
 ## Usage
 
 > [!NOTE]
-> This guide assumes you're already familiar with [HarperDb Components](https://docs.harperdb.io/docs/developers/components). Please review the documentation, or check out the HarperDB [Next.js Example](https://github.com/HarperDB/nextjs-example) for more information.
+> This guide assumes you're already familiar with [Harper Components](https://docs.harperdb.io/docs/reference/components). Please review the documentation, or check out the Harper [Next.js Example](https://github.com/HarperDB/nextjs-example) for more information.
 
 1. Install:
 
@@ -28,7 +28,7 @@ npm install @harperdb/nextjs
   files: '/*'
 ```
 
-3. Run your app with HarperDB:
+1. Run your app with `harperdb`:
 
 ```sh
 harperdb run nextjs-app
@@ -40,7 +40,7 @@ Alternatively, you can use the included `harperdb-nextjs` CLI:
 harperdb-nextjs build | dev | start
 ```
 
-4. Within any server side code paths, you can use [HarperDB Globals](https://docs.harperdb.io/docs/technical-details/reference/globals) after importing the HarperDB package:
+4. Within any server side code paths, you can use [Harper Globals](https://docs.harperdb.io/docs/reference/globals) after importing the `harperdb` package:
 
 ```js
 // app/actions.js
@@ -84,7 +84,7 @@ export default async function Dog({ params }) {
 }
 ```
 
-HarperDB relies on native dependencies and must be configured as an external package. In Next.js v14, update the next.config.js `webpack` option with:
+Harper relies on native dependencies and must be configured as an external package. In Next.js v14, update the next.config.js `webpack` option with:
 
 ```js
 	webpack: (config) => {
@@ -116,7 +116,7 @@ Enables Next.js dev mode. Defaults to `false`.
 
 ### `port: number`
 
-Specify a port for the Next.js server. Defaults to the HarperDB default port (generally `9926`).
+Specify a port for the Next.js server. Defaults to the Harper default port (generally `9926`).
 
 ### `prebuilt: boolean`
 
@@ -136,7 +136,7 @@ Harper will set the current working directory to the root of the Next.js app. Ne
 
 ## CLI
 
-This package includes a CLI (`harperdb-nextjs`) that is meant to replace certain functions of the Next.js CLI. It will launch HarperDB and set sensible configuration values.
+This package includes a CLI (`harperdb-nextjs`) that is meant to replace certain functions of the Next.js CLI. It will launch Harper and set sensible configuration values.
 
 Available commands include:
 
