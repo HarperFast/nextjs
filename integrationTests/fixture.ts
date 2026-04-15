@@ -29,9 +29,9 @@ export function makeHarperFixture(fixtureName: string) {
 				application: {
 					lockdown: 'none',
 					moduleLoader: 'none',
-					dependencyLoadaer: 'native'
-				}
-			}
+					dependencyLoadaer: 'native',
+				},
+			},
 		});
 
 		await use(started.harper);
@@ -42,7 +42,7 @@ export function makeHarperFixture(fixtureName: string) {
 
 export function fixture(fixtureName: string) {
 	const test = base.extend<{}, { harper: HarperContext }>({
-		harper: [makeHarperFixture(fixtureName), { scope: 'worker', timeout: 120_000 }]
+		harper: [makeHarperFixture(fixtureName), { scope: 'worker', timeout: 120_000 }],
 	});
 	return { test, expect };
 }

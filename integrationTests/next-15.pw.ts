@@ -1,4 +1,4 @@
-import { fixture } from "./fixture.ts";
+import { fixture } from './fixture.ts';
 
 const { test, expect } = fixture('next-15');
 

@@ -5,7 +5,6 @@ import { parse as urlParse } from 'node:url';
 import { join } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 
-
 import type NextModule14 from 'next-14';
 import type NextBuildModule14 from 'next-14/dist/cli/next-build.d.ts';
 
@@ -14,7 +13,6 @@ import type NextBuildModule15 from 'next-15/dist/cli/next-build.d.ts';
 
 import type NextModule16 from 'next-16';
 import type NextBuildModule16 from 'next-16/dist/cli/next-build.d.ts';
-
 
 interface NextPluginConfig extends Config {
 	buildOnly: boolean;
@@ -73,13 +71,13 @@ function resolveConfig(scope: Scope): NextPluginConfig {
 
 	// TODO: Remove type casts when we have more proper plugin option validation from core
 	return {
-		buildOnly: options.buildOnly as boolean ?? false,
-		dev: options.dev as boolean ?? false,
+		buildOnly: (options.buildOnly as boolean) ?? false,
+		dev: (options.dev as boolean) ?? false,
 		// @ts-expect-error
 		files: options.files,
 		port: options.port as number,
-		prebuilt: options.prebuilt as boolean ?? false,
-		runFirst: options.runFirst as boolean ?? false,
+		prebuilt: (options.prebuilt as boolean) ?? false,
+		runFirst: (options.runFirst as boolean) ?? false,
 		securePort: options.securePort as number,
 	} satisfies NextPluginConfig;
 }
@@ -107,7 +105,9 @@ function assertNextApp({ appName, directory, logger }: Scope): boolean {
 	const packageJSONPath = join(directory, 'package.json');
 	if (existsSync(packageJSONPath)) {
 		const packageJSON = JSON.parse(readFileSync(packageJSONPath, 'utf8'));
-		dependencyExists = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'].some(dependencyList => packageJSON[dependencyList]?.['next']);
+		dependencyExists = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'].some(
+			(dependencyList) => packageJSON[dependencyList]?.['next']
+		);
 	}
 
 	if (!configExists && !dependencyExists) {
@@ -123,7 +123,7 @@ function assertNextApp({ appName, directory, logger }: Scope): boolean {
 
 /**
  * Safely attempts to read the `.next/BUILD_ID`.
- * 
+ *
  * Returns `null` if it does not exist (empty BUILD_ID file or file does not exist)
  */
 function getBuildId(scope: Scope) {
@@ -141,7 +141,6 @@ function getBuildId(scope: Scope) {
 		throw error;
 	}
 }
-
 
 export async function handleApplication(scope: Scope) {
 	scope.logger.debug?.(`Handling Next.js Application ${scope.appName} as ${scope.directory}`);
@@ -188,7 +187,7 @@ export async function handleApplication(scope: Scope) {
 
 	if (config.prebuilt) {
 		// TODO: implement record check to skip-over following checks
-		// get record by appName 
+		// get record by appName
 		// - if it exists && within 500ms(?)
 		//   - if success goto serve
 		//   - if failure log and return early
@@ -208,15 +207,16 @@ export async function handleApplication(scope: Scope) {
 			return;
 		}
 
-
 		// In prebuilt mode, we still want to ensure the build is valid by checking for a `buildId`.
 		// We shouldn't try serving (and failing) if we can detect a potentially bad build.
 		// This is based on the assumption that a BUILD_ID file only exists for valid builds; not sure
 		// if that is 100% true or if Next.js provides any other guarantees or validation mechanisms.
 		const buildId = getBuildId(scope);
 		// Immediately set the build info record appropriately
-		await databases.harperfast_nextjs.nextjs_build_info.put(
-			scope.appName, { buildId, status: buildId !== null ? 'success' : 'failure' });
+		await databases.harperfast_nextjs.nextjs_build_info.put(scope.appName, {
+			buildId,
+			status: buildId !== null ? 'success' : 'failure',
+		});
 
 		if (buildId === null) {
 			return;
@@ -255,7 +255,7 @@ async function build(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 			scope.logger.debug?.(`Failure build of ${scope.appName} detected`);
 			return;
 		}
-		
+
 		// If the build info record is marked as "success"
 		if (buildInfo.status === 'success') {
 			// then validate the BUILD_ID value
@@ -275,29 +275,38 @@ async function build(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 	try {
 		switch (next.version) {
 			case 14:
-				await next.build({
-					lint: false,
-					mangling: true,
-					experimentalDebugMemoryUsage: false,
-					experimentalBuildMode: 'default',
-				}, scope.directory);
+				await next.build(
+					{
+						lint: false,
+						mangling: true,
+						experimentalDebugMemoryUsage: false,
+						experimentalBuildMode: 'default',
+					},
+					scope.directory
+				);
 				break;
 			case 15:
-				await next.build({
-					lint: false,
-					mangling: true,
-					turbopack: false,
-					experimentalDebugMemoryUsage: false,
-					experimentalBuildMode: 'default',
-				}, scope.directory);
+				await next.build(
+					{
+						lint: false,
+						mangling: true,
+						turbopack: false,
+						experimentalDebugMemoryUsage: false,
+						experimentalBuildMode: 'default',
+					},
+					scope.directory
+				);
 				break;
 			case 16:
-				await next.build({
-					mangling: true,
-					webpack: true,
-					experimentalDebugMemoryUsage: false,
-					experimentalBuildMode: 'default',
-				}, scope.directory);
+				await next.build(
+					{
+						mangling: true,
+						webpack: true,
+						experimentalDebugMemoryUsage: false,
+						experimentalBuildMode: 'default',
+					},
+					scope.directory
+				);
 				break;
 		}
 
@@ -309,12 +318,10 @@ async function build(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 		return;
 	} catch (error) {
 		await databases.harperfast_nextjs.nextjs_build_info.put(scope.appName, { buildId: null, status: 'failure' });
-		scope.logger.debug?.(`Error building ${scope.appName}`)
+		scope.logger.debug?.(`Error building ${scope.appName}`);
 		throw error;
 	}
 }
-
-
 
 async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) {
 	scope.logger.debug?.(`Serving Next.js application at ${scope.directory}`);
@@ -333,15 +340,15 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 	}
 
 	await app.prepare();
-	
+
 	const requestHandler = app.getRequestHandler();
 
 	scope.server?.http?.(
 		(request, next) => {
 			return request._nodeResponse === undefined
 				? next(request)
-				// @ts-expect-error - Not sure when the IncomingMessage.url could be undefined ; need to dig into it.
-				: requestHandler(request._nodeRequest, request._nodeResponse, urlParse(request._nodeRequest.url, true));
+				: // @ts-expect-error - Not sure when the IncomingMessage.url could be undefined ; need to dig into it.
+					requestHandler(request._nodeRequest, request._nodeResponse, urlParse(request._nodeRequest.url, true));
 		},
 		{ runFirst: config.runFirst, port: config.port, securePort: config.securePort }
 	);
@@ -388,15 +395,17 @@ type NextPackage = Next14 | Next15 | Next16;
 
 // This function imports the Next.js version specified by the application
 function importNext(scope: Scope): NextPackage {
-  const require = createRequire(join(scope.directory, 'package.json'));
-  const nextPackage = require('next/package.json');
-  const version = parseInt(nextPackage.version.split('.')[0], 10);
-  if (version !== 14 && version !== 15 && version !== 16) {
-	throw new Error(`Unsupported Next.js version detected: ${nextPackage.version}. The \`@harperfast/nextjs\` plugin only supports Next.js versions: 14, 15, 16`);
-  }
-  // The default export is the `createServer` function
-  const server = require('next');
-  // Use the `nextBuild` method
-  const build = require('next/dist/cli/next-build.js').nextBuild;
-  return { server, build, version };
+	const require = createRequire(join(scope.directory, 'package.json'));
+	const nextPackage = require('next/package.json');
+	const version = parseInt(nextPackage.version.split('.')[0], 10);
+	if (version !== 14 && version !== 15 && version !== 16) {
+		throw new Error(
+			`Unsupported Next.js version detected: ${nextPackage.version}. The \`@harperfast/nextjs\` plugin only supports Next.js versions: 14, 15, 16`
+		);
+	}
+	// The default export is the `createServer` function
+	const server = require('next');
+	// Use the `nextBuild` method
+	const build = require('next/dist/cli/next-build.js').nextBuild;
+	return { server, build, version };
 }

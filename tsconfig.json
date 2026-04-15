@@ -12,11 +12,11 @@
 		// Interop and module resolution
 		"esModuleInterop": true,
 		"allowSyntheticDefaultImports": true,
-		
+
 		// Node.js type-stripping
 		"rewriteRelativeImportExtensions": true,
 		"erasableSyntaxOnly": true,
 		"verbatimModuleSyntax": true,
-		"allowImportingTsExtensions": true,
-	},
+		"allowImportingTsExtensions": true
+	}
 }

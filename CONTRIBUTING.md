@@ -58,14 +58,14 @@ const { test, expect } = fixture('<name>');
 
 // Browser-based assertion
 test('home page renders', async ({ page, harper }) => {
-    await page.goto(harper.httpURL);
-    await expect(page.locator('h1')).toHaveText('Expected');
+	await page.goto(harper.httpURL);
+	await expect(page.locator('h1')).toHaveText('Expected');
 });
 
 // Raw HTTP assertion (no browser)
 test('health endpoint returns 200', async ({ request, harper }) => {
-    const response = await request.get(`${harper.operationsAPIURL}/health`);
-    expect(response.status()).toBe(200);
+	const response = await request.get(`${harper.operationsAPIURL}/health`);
+	expect(response.status()).toBe(200);
 });
 ```
 

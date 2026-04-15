@@ -1,4 +1,4 @@
-import { fixture } from "./fixture.ts";
+import { fixture } from './fixture.ts';
 
 const { test, expect } = fixture('next-16');
 
@@ -76,7 +76,7 @@ test.describe.skip('ISR caching', () => {
 		const response = await request.post(harper.operationsAPIURL, {
 			headers: {
 				'Content-Type': 'application/json',
-				Authorization: `Basic ${Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString('base64')}`,
+				'Authorization': `Basic ${Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString('base64')}`,
 			},
 			data: {
 				operation: 'search_by_value',
@@ -119,7 +119,7 @@ test.describe.skip('ISR caching', () => {
 		};
 
 		const before = await request.post(harper.operationsAPIURL, {
-			headers: { 'Content-Type': 'application/json', Authorization: authHeader },
+			headers: { 'Content-Type': 'application/json', 'Authorization': authHeader },
 			data: queryPayload,
 		});
 		const [beforeRecord] = await before.json();
@@ -135,7 +135,7 @@ test.describe.skip('ISR caching', () => {
 
 		// Query again.
 		const after = await request.post(harper.operationsAPIURL, {
-			headers: { 'Content-Type': 'application/json', Authorization: authHeader },
+			headers: { 'Content-Type': 'application/json', 'Authorization': authHeader },
 			data: queryPayload,
 		});
 		const [afterRecord] = await after.json();
