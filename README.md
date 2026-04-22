@@ -143,9 +143,12 @@ Specify a custom HTTPS port for the Next.js server. Defaults to the Harper defau
 
 When enabled, the Next.js request handler runs before any other Harper HTTP middleware. Useful for scenarios where Next.js handles authentication directly. Note that enabling this will conflict with Harper's REST API on the same port — consider using a dedicated `port` to avoid conflicts. Defaults to `false`.
 
+<!--
+The `files` option is now optional with plugins. This make configuration simpler in general. The plugin doesn't currently have any special file handling too. If the app changes, harper needs to be restarted. This is common behavior for applications. The default file handler mechanism in core will alert. In the future,
 ### `files: string`
 
 Glob pattern specifying which files Harper should watch for changes. Example: `'/app/*'`.
+-->
 
 ## Caching (Work In Progress)
 

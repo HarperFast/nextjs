@@ -134,7 +134,7 @@ function getBuildId(scope: Scope) {
 	} catch (error) {
 		// Ignore ENOENT errors (.next/BUILD_ID does not exist)
 		// @ts-expect-error
-		if (error.code !== 'ENOENT') {
+		if (error.code === 'ENOENT') {
 			return null;
 		}
 		// Otherwise rethrow error
@@ -146,22 +146,20 @@ export async function handleApplication(scope: Scope) {
 	scope.logger.debug?.(`Handling Next.js Application ${scope.appName} as ${scope.directory}`);
 	const config = resolveConfig(scope);
 
-	// TODO: delegate this to the Next.js build/server functions instead.
+	// TODO: delegate asserting the app to the Next.js build/server functions instead.
 	if (!assertNextApp(scope)) {
 		return;
 	}
 
-	// Initialize the build info as stale.
-	// await databases.harperfast_nextjs.nextjs_build_info.put(scope.appName, { buildId: null, status: 'stale' });
+	// The original idea here was to use the file change detection mechanism to make rebuilds smarter.
+	// Specifically, if the plugin detects application file changes, then it should rebuild immediately
+	// and _then_ restart the threads. This would then let the user skip building after threads restart.
+	// Unfortunately, with the time based mechanism below I don't think this is as deterministic and must
+	// be thought through again. Additionally this was not as simple as originally thought. Unless the user
+	// knows to finely tune the `files` option, what exactly should Harper watch automatically? Surely not
+	// _everything_ in an application directory. Including things like `node_modules` would be impossible too.
+	// So just leave this artifact here for a future feature improvement.
 
-	// Figure out what to do with this with the new build info table
-	// if (config.buildOnly) {
-	// 	await build(scope, config);
-	// 	scope.logger.info?.('buildOnly mode is enabled, exiting');
-	// 	process.exit(0);
-	// }
-
-	// Need to figure this out better.
 	// // If files for the next.js app change, we want to mark the build as stale and request a restart
 	// // this way when the threads restart, and see the existing `.next/BUILD_ID` file, they will still rebuild the app.
 	// async function entryHandler (entry: FileEntryEvent | DirectoryEntryEvent) {
