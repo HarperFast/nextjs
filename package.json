@@ -40,6 +40,7 @@
 		"format:check": "npm run format -- --check",
 		"format:fix": "npm run format -- --write",
 		"build": "tsc -p tsconfig.build.json",
+		"install:fixtures": "node scripts/install-fixtures.js",
 		"test:integration": "playwright test --config integrationTests/playwright.config.ts"
 	},
 	"engines": {

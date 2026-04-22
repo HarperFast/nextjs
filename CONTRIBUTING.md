@@ -36,6 +36,12 @@ The `fixture()` helper in `integrationTests/fixture.ts` handles the wiring: it s
 
 ### Running the tests
 
+Before running tests for the first time (and after updating fixture dependencies), install the fixture dependencies:
+
+```sh
+npm run install:fixtures
+```
+
 Run all the tests:
 
 ```sh

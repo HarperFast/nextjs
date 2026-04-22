@@ -63,6 +63,9 @@ jobs:
       - name: Build
         run: npm run build || true
 
+      - name: Install fixture dependencies
+        run: npm run install:fixtures
+
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
 
