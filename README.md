@@ -18,9 +18,28 @@ A [Harper Plugin](https://docs.harperdb.io/docs/reference/components/plugins) fo
 npm install @harperfast/nextjs
 ```
 
-2. Wrap your Next.js config with `withHarper()` in `next.config.js`:
+2. Wrap your Next.js config with `withHarper()`. All Next.js config formats are supported:
 
 ```js
+// next.config.js (CommonJS)
+const { withHarper } = require('@harperfast/nextjs');
+
+module.exports = withHarper({
+	// your existing Next.js config
+});
+```
+
+```js
+// next.config.mjs (ESM)
+import { withHarper } from '@harperfast/nextjs';
+
+export default withHarper({
+	// your existing Next.js config
+});
+```
+
+```ts
+// next.config.ts (TypeScript)
 import { withHarper } from '@harperfast/nextjs';
 
 export default withHarper({
@@ -92,9 +111,9 @@ A configuration helper that wraps your Next.js config. It automatically adds `ha
 
 ```js
 // next.config.js
-import { withHarper } from '@harperfast/nextjs';
+const { withHarper } = require('@harperfast/nextjs');
 
-export default withHarper({
+module.exports = withHarper({
 	// Any valid Next.js configuration options
 });
 ```

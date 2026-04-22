@@ -23,9 +23,16 @@ export function withHarper(config: NextConfig, harperConfig: HarperConfig = {}):
 
 	return {
 		...config,
-		// TODO: Along with the version detection above, we may need to also support `harperdb` in
-		// in this list too if we maintain backwards compatibility with v4
-		serverExternalPackages: [...(config.serverExternalPackages ?? []), 'harper', 'harper-pro'],
-		...(experimentalHarperCache && { cacheHandler: join(import.meta.dirname, 'CacheHandler.js') }),
+		webpack: (config) => {
+			config.externals.push({
+				'harperdb': 'commonjs harperdb',
+				'harper': 'commonjs harper',
+				'harper-pro': 'commonjs harper-pro',
+			});
+
+			return config;
+		},
+		serverExternalPackages: [...(config.serverExternalPackages ?? []), 'harperdb', 'harper', 'harper-pro'],
+		...(experimentalHarperCache && { cacheHandler: join(__dirname, 'CacheHandler.cjs') }),
 	};
 }

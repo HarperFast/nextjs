@@ -2,15 +2,25 @@
 
 ## Code Organization
 
-The key source files for the repo are:
+The key source files are:
 
-- `plugin.ts` — the plugin implementation, compiled to `dist/` for publishing
-- `schema.graphql` - the plugin table schemas
+- `src/plugin.ts` — the Harper plugin implementation (ESM, loaded by Harper's runtime)
+- `src/withHarper.cts` — the `withHarper()` Next.js config helper (CJS, loaded by Next.js config files)
+- `src/CacheHandler.cts` — the Harper-backed ISR cache handler (CJS, loaded by Next.js at runtime)
+- `schema.graphql` — the plugin table schemas
 - `config.yaml` — Harper configuration for the plugin
 
-These are what are included in the published module and what Harper relies on for the plugin to work.
+The `.cts` extension marks files as CommonJS, which is required because Next.js config files (`next.config.js`, `next.config.mjs`, `next.config.ts`) all use CommonJS module resolution. `plugin.ts` stays as ESM since it is only loaded by Harper's own runtime.
 
-The `fixtures/` directory contains minimal Next.js applications used as integration test targets. Each subdirectory is a self-contained app with the plugin installed and configured.
+Run `npm run build` to compile `src/withHarper.cts` and `src/CacheHandler.cts` to `dist/cjs/`. The `src/plugin.ts` file is not compiled — Harper loads it directly using Node's type-stripping support.
+
+The published module includes `dist/`, `config.yaml`, and `schema.graphql`.
+
+The `fixtures/` directory contains minimal Next.js applications used as integration test targets. Each subdirectory is a self-contained app with the plugin installed and configured. The three main fixtures each use a different config format to cover the full compatibility matrix:
+
+- `fixtures/next-14/` — `next.config.js` (CommonJS `require`)
+- `fixtures/next-15/` — `next.config.mjs` (ESM `import`)
+- `fixtures/next-16/` — `next.config.ts` (TypeScript)
 
 The `integrationTests/` directory contains the Playwright test files and supporting infrastructure.
 

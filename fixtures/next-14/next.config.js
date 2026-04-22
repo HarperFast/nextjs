@@ -1,1 +1,3 @@
-module.exports = {};
+const { withHarper } = require('@harperfast/nextjs');
+
+module.exports = withHarper({});

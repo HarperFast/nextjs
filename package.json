@@ -30,8 +30,9 @@
 	],
 	"exports": {
 		".": {
-			"import": "./dist/index.js",
-			"types": "./dist/index.d.ts"
+			"require": "./dist/withHarper.cjs",
+			"default": "./dist/withHarper.cjs",
+			"types": "./dist/withHarper.d.cts"
 		}
 	},
 	"scripts": {
