@@ -37,36 +37,9 @@ jobs:
             echo "node-versions=[${{ github.event.inputs.node-version }}]" >> $GITHUB_OUTPUT
           fi
 
-  build:
-    name: Build
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Set up Node.js
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
-        with:
-          node-version: 24
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build
-        run: npm run build || true
-
-      - name: Upload build artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: dist
-          path: dist/
-          retention-days: 1
-
   integration-tests:
     name: Integration Tests (Node ${{ matrix.node-version }})
-    needs: [generate-node-version-matrix, build]
+    needs: generate-node-version-matrix
     runs-on: ubuntu-latest
 
     strategy:
@@ -82,16 +55,13 @@ jobs:
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
           node-version: ${{ matrix.node-version }}
-          cache: 'npm'
+          package-manager-cache: false
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install
 
-      - name: Download build artifact
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: dist
-          path: dist/
+      - name: Build
+        run: npm run build || true
 
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
