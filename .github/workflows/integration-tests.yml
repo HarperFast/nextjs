@@ -71,6 +71,16 @@ jobs:
 
       - name: Run integration tests
         run: npm run test:integration
+        env:
+          HARPER_INTEGRATION_TEST_LOG_DIR: /tmp/harper-test-logs
+
+      - name: Upload Harper logs on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: harper-logs-node-${{ matrix.node-version }}
+          path: /tmp/harper-test-logs/
+          retention-days: 7
 
       - name: Upload Playwright traces on failure
         if: failure()
