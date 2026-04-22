@@ -26,7 +26,10 @@ export function makeHarperFixture(fixtureName: string) {
 			harperBinPath: getHarperBinPath(),
 			startupTimeoutMs: STARTUP_TIMEOUT_MS,
 			config: {
-				application: {
+				logging: {
+					stdStreams: true,
+				},
+				applications: {
 					lockdown: 'none',
 					moduleLoader: 'none',
 					dependencyLoader: 'native',
