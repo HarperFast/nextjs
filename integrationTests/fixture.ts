@@ -31,7 +31,7 @@ export function makeHarperFixture(fixtureName: string) {
 				},
 				applications: {
 					lockdown: 'none',
-					moduleLoader: 'none',
+					moduleLoader: 'native',
 					dependencyLoader: 'native',
 				},
 			},

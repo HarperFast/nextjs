@@ -270,6 +270,12 @@ async function build(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 
 	scope.logger.debug?.(`Building Next.js application at ${scope.directory}`);
 
+	// --expose-internals is set in Harper's worker execArgv but is not allowed in NODE_OPTIONS.
+	// Next.js reads process.execArgv to forward flags to its own child workers via NODE_OPTIONS,
+	// which causes Node to reject the build worker. Strip it before building and restore after.
+	const exposeInternalsIdx = process.execArgv.indexOf('--expose-internals');
+	if (exposeInternalsIdx !== -1) process.execArgv.splice(exposeInternalsIdx, 1);
+
 	try {
 		switch (next.version) {
 			case 14:
@@ -318,6 +324,8 @@ async function build(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 		await databases.harperfast_nextjs.nextjs_build_info.put(scope.appName, { buildId: null, status: 'failure' });
 		scope.logger.debug?.(`Error building ${scope.appName}`);
 		throw error;
+	} finally {
+		if (exposeInternalsIdx !== -1) process.execArgv.splice(exposeInternalsIdx, 0, '--expose-internals');
 	}
 }
 
