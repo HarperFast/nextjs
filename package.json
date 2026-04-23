@@ -1,8 +1,8 @@
 {
-	"name": "@harperdb/nextjs",
-	"version": "1.2.2",
+	"name": "@harperfast/nextjs",
+	"version": "2.0.0",
 	"type": "module",
-	"description": "A Harper extension for running Next.js apps.",
+	"description": "A Harper plugin for running Next.js apps.",
 	"keywords": [
 		"harper",
 		"next.js",
@@ -12,7 +12,7 @@
 	"homepage": "https://github.com/HarperFast/nextjs",
 	"bugs": {
 		"url": "https://github.com/HarperFast/nextjs/issues",
-		"email": "support@harperdb.io"
+		"email": "opensource@harperdb.io"
 	},
 	"author": {
 		"name": "Harper",
@@ -23,26 +23,54 @@
 		"url": "git+https://github.com/HarperFast/nextjs.git"
 	},
 	"license": "Apache-2.0",
-	"bin": {
-		"harperdb-nextjs": "cli.js"
-	},
 	"files": [
+		"dist",
 		"config.yaml",
-		"extension.js",
-		"cli.js"
+		"schema.graphql"
 	],
+	"exports": {
+		".": {
+			"require": "./dist/withHarper.cjs",
+			"default": "./dist/withHarper.cjs",
+			"types": "./dist/withHarper.d.cts"
+		}
+	},
 	"scripts": {
 		"format": "prettier .",
 		"format:check": "npm run format -- --check",
 		"format:fix": "npm run format -- --write",
-		"lint": "eslint ."
+		"build": "tsc -p tsconfig.build.json",
+		"install:fixtures": "node scripts/install-fixtures.js",
+		"test:integration": "playwright test --config integrationTests/playwright.config.ts"
+	},
+	"engines": {
+		"node": ">=20"
+	},
+	"devEngines": {
+		"runtime": {
+			"name": "node",
+			"version": ">=20"
+		}
 	},
 	"devDependencies": {
-		"@eslint/js": "^9.17.0",
-		"@harperdb/code-guidelines": "^0.0.2",
-		"eslint": "^9.17.0",
-		"globals": "^15.14.0",
-		"prettier": "^3.4.2"
+		"@harperdb/code-guidelines": "0.0.6",
+		"@harperfast/integration-testing": "0.2.0",
+		"@playwright/test": "1.52.0",
+		"@types/node": "^20",
+		"harper": "5.0.3",
+		"next-14": "npm:next@14.2.35",
+		"next-15": "npm:next@15.5.15",
+		"next-16": "npm:next@16.2.4",
+		"prettier": "3.4.2",
+		"typescript": "5.9.3"
+	},
+	"peerDependencies": {
+		"next": "^14 || ^15 || ^16"
+	},
+	"peerDependenciesMeta": {
+		"next": {
+			"optional": false
+		}
 	},
 	"prettier": "@harperdb/code-guidelines/prettier"
 }

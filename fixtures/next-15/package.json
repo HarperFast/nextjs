@@ -5,13 +5,12 @@
 		"dev": "next dev",
 		"build": "next build",
 		"start": "next start",
-		"lint": "next lint",
-		"postinstall": "npm link @harperdb/nextjs"
+		"lint": "next lint"
 	},
 	"dependencies": {
-		"@harperdb/nextjs": "*",
-		"react": "19.0.0",
-		"react-dom": "19.0.0",
+		"@harperfast/nextjs": "file:../../",
+		"react": "^19",
+		"react-dom": "^19",
 		"next": "^15"
 	}
 }

@@ -1,0 +1,22 @@
+{
+	"include": ["src/**/*.ts"],
+	"compilerOptions": {
+		// Type checking only by default; use `tsconfig.build.json` for emitting
+		"noEmit": true,
+
+		// Target Node 20+ with ES2022 features
+		"target": "ES2022",
+		"module": "NodeNext",
+		"moduleResolution": "NodeNext",
+
+		// Interop and module resolution
+		"esModuleInterop": true,
+		"allowSyntheticDefaultImports": true,
+
+		// Node.js type-stripping
+		"rewriteRelativeImportExtensions": true,
+		"erasableSyntaxOnly": true,
+		"verbatimModuleSyntax": true,
+		"allowImportingTsExtensions": true
+	}
+}

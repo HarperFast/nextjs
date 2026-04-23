@@ -1,5 +1,0 @@
-rest: true
-graphqlSchema:
-  files: './schema.graphql'
-jsResource:
-  files: './resources.js'

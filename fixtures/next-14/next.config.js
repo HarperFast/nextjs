@@ -1,9 +1,3 @@
-module.exports = {
-	webpack: (config) => {
-		config.externals.push({
-			harperdb: 'commonjs harperdb',
-		});
+const { withHarper } = require('@harperfast/nextjs');
 
-		return config;
-	},
-};
+module.exports = withHarper({});

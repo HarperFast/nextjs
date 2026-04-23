@@ -1,52 +1,74 @@
-# @harperdb/nextjs
+# @harperfast/nextjs
 
-A [Harper Extension](https://docs.harperdb.io/docs/reference/components/extensions) for running and developing Next.js apps.
+A [Harper Plugin](https://docs.harperdb.io/docs/reference/components/plugins) for running Next.js apps with Harper.
 
-![NPM Version](https://img.shields.io/npm/v/%40harperdb%2Fnextjs)
+![NPM Version](https://img.shields.io/npm/v/%40harperfast%2Fnextjs)
 
-Most Next.js features are supported as we rely on the Next.js Server provided by Next.js to run your application.
-
-> [!TIP]
-> Watch a walkthrough of this component in action here: [Next.js on HarperDB | Step-by-Step Guide for Next Level Next.js Performance](https://youtu.be/GqLEwteFJYY)
+> [!NOTE]
+> This package currently supports **Next.js v14, v15, and v16** only.
 
 ## Usage
 
 > [!NOTE]
-> This guide assumes you're already familiar with [Harper Components](https://docs.harperdb.io/docs/reference/components). Please review the documentation, or check out the Harper [Next.js Example](https://github.com/HarperDB/nextjs-example) for more information.
+> This guide assumes you're already familiar with [Harper Components](https://docs.harperdb.io/docs/reference/components). Please review the documentation, or check out the Harper [Next.js Example](https://github.com/HarperFast/nextjs-example) for more information.
 
 1. Install:
 
 ```sh
-npm install @harperdb/nextjs
+npm install @harperfast/nextjs
 ```
 
-2. Add to `config.yaml`:
+2. Wrap your Next.js config with `withHarper()`. All Next.js config formats are supported:
+
+```js
+// next.config.js (CommonJS)
+const { withHarper } = require('@harperfast/nextjs');
+
+module.exports = withHarper({
+	// your existing Next.js config
+});
+```
+
+```js
+// next.config.mjs (ESM)
+import { withHarper } from '@harperfast/nextjs';
+
+export default withHarper({
+	// your existing Next.js config
+});
+```
+
+```ts
+// next.config.ts (TypeScript)
+import { withHarper } from '@harperfast/nextjs';
+
+export default withHarper({
+	// your existing Next.js config
+});
+```
+
+3. Add to `config.yaml`:
 
 ```yaml
-'@harperdb/nextjs':
-  package: '@harperdb/nextjs'
-  files: '/*'
+'@harperfast/nextjs':
+  package: '@harperfast/nextjs'
 ```
 
-1. Run your app with `harperdb`:
+4. Run your app with Harper v5:
 
 ```sh
-harperdb run nextjs-app
+harper run nextjs-app
 ```
 
-Alternatively, you can use the included `harperdb-nextjs` CLI:
+5. Within any server-side code paths, you can use [Harper Globals](https://docs.harperdb.io/docs/reference/globals) after importing the `harper` package:
 
-```sh
-harperdb-nextjs build | dev | start
-```
-
-4. Within any server side code paths, you can use [Harper Globals](https://docs.harperdb.io/docs/reference/globals) after importing the `harperdb` package:
+> Just make sure you are using `withHarper()` or that you've added the `harper` (or `harper-pro`) package to the `serverExternalPackages` list in the Next.js config.
 
 ```js
 // app/actions.js
 'use server';
 
-import('harperdb');
+import 'harper';
 
 export async function listDogs() {
 	const dogs = [];
@@ -54,10 +76,6 @@ export async function listDogs() {
 		dogs.push({ id: dog.id, name: dog.name });
 	}
 	return dogs;
-}
-
-export async function getDog(id) {
-	return tables.Dog.get(id);
 }
 ```
 
@@ -67,7 +85,6 @@ import { getDog, listDogs } from '@/app/actions';
 
 export async function generateStaticParams() {
 	const dogs = await listDogs();
-
 	return dogs;
 }
 
@@ -84,77 +101,95 @@ export default async function Dog({ params }) {
 }
 ```
 
-Harper relies on native dependencies and must be configured as an external package. In Next.js v14, update the next.config.js `webpack` option with:
+## `withHarper()`
+
+`withHarper(config: NextConfig, harperConfig?: HarperConfig): NextConfig`
+
+A configuration helper that wraps your Next.js config. It automatically adds `harper` and `harper-pro` to `serverExternalPackages` so Harper's native dependencies are treated correctly by the bundler.
+
+**Example:**
 
 ```js
-	webpack: (config) => {
-		config.externals.push({
-			harperdb: 'commonjs harperdb',
-		});
+// next.config.js
+const { withHarper } = require('@harperfast/nextjs');
 
-		return config;
+module.exports = withHarper({
+	// Any valid Next.js configuration options
+});
+```
+
+### `experimentalHarperCache: boolean`
+
+Enables the built-in Harper [cache handler](#caching-work-in-progress). Defaults to `false`.
+
+```js
+export default withHarper(
+	{
+		/* Next.js config */
 	},
+	{ experimentalHarperCache: true }
+);
 ```
 
 ## Options
 
-> All configuration options are optional
-
-### `buildCommand: string`
-
-Specify a custom build command. Defaults to `next build`.
-
-> Note: the extension will skip building if the `prebuilt` option is set to `true`
-
-### `buildOnly: boolean`
-
-Build the Next.js application and then exit (including shutting down HarperDB). Defaults to `false`.
+All plugin options are configured in `config.yaml` under the `@harperfast/nextjs` key. All options are optional.
 
 ### `dev: boolean`
 
-Enables Next.js dev mode. Defaults to `false`.
+Enables Next.js development mode with hot module replacement (HMR). Defaults to `false`.
 
-### `port: number`
-
-Specify a port for the Next.js server. Defaults to the Harper default port (generally `9926`).
+> [!NOTE]
+> Dev mode for Next.js relies on WebSockets. If you encounter an `Invalid WebSocket frame:` error, disable any other WebSocket services running on the same port.
 
 ### `prebuilt: boolean`
 
-When enabled, the extension will look for a `.next` directory in the root of the component and skip executing the `buildCommand`. Defaults to `false`.
+When enabled, the plugin will look for an existing `.next` directory and skip the build step. Defaults to `false`.
 
-### `runFirst: boolean`
+### `buildOnly: boolean`
 
-Configure the Next.js request handler to run first in the Harper HTTP middleware. When enabled, the Next.js request handler is executed before any other Harper HTTP middleware handlers. This is useful for things such as handling authentication directly with the Next.js app instead of delegating that to Harper. Enabling this option will conflict with other Harper HTTP things such as the REST API. Consider specifying the `port` (or `securePort`) option as well and separating the Next.js app HTTP server from the rest of Harper so there is less conflicts. Defaults to `false`.
+Build the Next.js application and then exit (including shutting down Harper). Defaults to `false`.
+
+### `port: number`
+
+Specify a custom HTTP port for the Next.js server. Defaults to the Harper default port (`9926`).
 
 ### `securePort: number`
 
-Specify a secure port for the Next.js server. Defaults to the HarperDB default secure port.
+Specify a custom HTTPS port for the Next.js server. Defaults to the Harper default secure port.
 
-### `setCwd: boolean`
+### `runFirst: boolean`
 
-Harper will set the current working directory to the root of the Next.js app. Necessary for some Next.js and React libraries. Can cause other issues with Harper Components. Use with caution. Defaults to `false`.
+When enabled, the Next.js request handler runs before any other Harper HTTP middleware. Useful for scenarios where Next.js handles authentication directly. Note that enabling this will conflict with Harper's REST API on the same port — consider using a dedicated `port` to avoid conflicts. Defaults to `false`.
 
-## CLI
+<!--
+The `files` option is now optional with plugins. This make configuration simpler in general. The plugin doesn't currently have any special file handling too. If the app changes, harper needs to be restarted. This is common behavior for applications. The default file handler mechanism in core will alert. In the future,
+### `files: string`
 
-This package includes a CLI (`harperdb-nextjs`) that is meant to replace certain functions of the Next.js CLI. It will launch Harper and set sensible configuration values.
+Glob pattern specifying which files Harper should watch for changes. Example: `'/app/*'`.
+-->
 
-Available commands include:
+## Caching (Work In Progress)
 
-### `dev`
+> This custom caching handler is currently a WIP and is actively being developed.
 
-Launches the application in Next.js development mode, and enables HMR for instantaneous updates when modifying application code.
+`@harperfast/nextjs` includes a built-in cache handler for Next.js [Incremental Static Regeneration (ISR)](https://nextjs.org/docs/app/guides/incremental-static-regeneration). Instead of storing cached pages on the file system, cached data is stored in Harper's database, making it available across all nodes in your Harper cluster.
 
-> [!NOTE]
-> Dev mode for Next.js v13+ relies on WebSockets. If you encounter an `Invalid WebSocket frame:` error, disable any other WebSocket services on the Next.js port. This commonly can be the HarperDB MQTT WebSocket service, which can be configured under the `mqtt` option within `harperdb-config.yaml`.
+Enable it via the `experimentalHarperCache` option in [`withHarper()`](#withharper):
 
-### `build`
+```js
+export default withHarper(
+	{
+		/* Next.js config */
+	},
+	{ experimentalHarperCache: true }
+);
+```
 
-Builds the application and then exits the process.
+## Contributing
 
-### `start`
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Launches the application in Next.js production mode.
+## License
 
-### `help`
-
-Lists available CLI commands.
+[Apache-2.0](LICENSE)

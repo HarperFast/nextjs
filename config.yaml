@@ -1,1 +1,4 @@
-extensionModule: ./extension.js
+graphqlSchema:
+  files: 'schema.graphql'
+
+pluginModule: dist/plugin.js

@@ -1,0 +1,11 @@
+type NextBuildInfo @table(database: "harperfast_nextjs", table: "nextjs_build_info") {
+	appName: String @primaryKey
+	buildId: String
+	status: String
+}
+
+type NextISRCache @table(database: "harperfast_nextjs", table: "nextjs_isr_cache") {
+	id: String @primaryKey
+	data: String
+	lastModified: Long @updatedTime
+}

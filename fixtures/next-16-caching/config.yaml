@@ -1,2 +1,7 @@
+rest: true
+
+jsResource:
+  files: nonce.js
+
 '@harperfast/nextjs':
   package: '@harperfast/nextjs'
