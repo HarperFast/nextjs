@@ -10,7 +10,20 @@ import { test as base, expect } from '@playwright/test';
 
 const require = createRequire(import.meta.url);
 
+/**
+ * Resolve the Harper binary path based on the HARPER_DISTRIBUTION environment variable.
+ *
+ * - `harper` (default): uses the `harper` npm package (`dist/bin/harper.js` resolved via require)
+ * - `harper-pro`: uses the `@harperfast/harper-pro` package (`dist/bin/harper.js`)
+ *
+ * Set via `HARPER_DISTRIBUTION=harper-pro npm run test:integration` or use the
+ * dedicated `test:integration:harper-pro` npm script.
+ */
 function getHarperBinPath(): string {
+	const distribution = process.env.HARPER_DISTRIBUTION ?? 'harper';
+	if (distribution === 'harper-pro') {
+		return join(dirname(require.resolve('@harperfast/harper-pro/package.json')), 'dist', 'bin', 'harper.js');
+	}
 	return join(dirname(require.resolve('harper')), 'bin', 'harper.js');
 }
 
