@@ -10,9 +10,7 @@ The key source files are:
 - `schema.graphql` — the plugin table schemas
 - `config.yaml` — Harper configuration for the plugin
 
-The `.cts` extension marks files as CommonJS, which is required because Next.js config files (`next.config.js`, `next.config.mjs`, `next.config.ts`) all use CommonJS module resolution. `plugin.ts` stays as ESM since it is only loaded by Harper's own runtime.
-
-Run `npm run build` to compile `src/withHarper.cts` and `src/CacheHandler.cts` to `dist/cjs/`. The `src/plugin.ts` file is not compiled — Harper loads it directly using Node's type-stripping support.
+Run `npm run build` to compile the `src/` directory. The `.cts` extension marks files as CommonJS, which is required because Next.js config files (`next.config.js`, `next.config.mjs`, `next.config.ts`) all use CommonJS module resolution. `plugin.ts` stays as ESM since it is only loaded by Harper's own runtime.
 
 The published module includes `dist/`, `config.yaml`, and `schema.graphql`.
 
