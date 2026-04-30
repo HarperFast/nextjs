@@ -5,47 +5,16 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
-    inputs:
-      node-version:
-        description: 'Node.js version'
-        required: true
-        type: choice
-        default: 'all'
-        options:
-          - 'all'
-          - '20'
-          - '22'
-          - '24'
 
 jobs:
-  generate-node-version-matrix:
-    name: Generate Node Version Matrix
-    runs-on: ubuntu-latest
-    outputs:
-      node-versions: ${{ steps.set-node-versions.outputs.node-versions }}
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Set Node versions
-        id: set-node-versions
-        run: |
-          if [ "${{ github.event.inputs.node-version }}" == "all" ] || [ -z "${{ github.event.inputs.node-version }}" ]; then
-            echo "node-versions=[20, 22, 24]" >> $GITHUB_OUTPUT
-          else
-            echo "node-versions=[${{ github.event.inputs.node-version }}]" >> $GITHUB_OUTPUT
-          fi
-
   integration-tests:
-    name: Integration Tests (Node ${{ matrix.node-version }})
-    needs: generate-node-version-matrix
+    name: Shard ${{ matrix.shard }}/3
     runs-on: ubuntu-latest
 
     strategy:
       fail-fast: false
       matrix:
-        node-version: ${{ fromJson(needs.generate-node-version-matrix.outputs.node-versions) }}
+        shard: [1, 2, 3]
 
     steps:
       - name: Checkout code
@@ -54,7 +23,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: 22
           package-manager-cache: false
 
       - name: Install dependencies
@@ -70,15 +39,17 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Run integration tests
-        run: npm run test:integration
+        run: npx playwright test --config integrationTests/playwright.config.ts --shard=${{ matrix.shard }}/3 --workers=1
+        timeout-minutes: 5
         env:
           HARPER_INTEGRATION_TEST_LOG_DIR: /tmp/harper-test-logs
+          FORCE_COLOR: '1'
 
       - name: Upload Harper logs on failure
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: harper-logs-node-${{ matrix.node-version }}
+          name: harper-logs-shard-${{ matrix.shard }}
           path: /tmp/harper-test-logs/
           retention-days: 7
 
@@ -86,6 +57,6 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: playwright-traces-node-${{ matrix.node-version }}
+          name: playwright-traces-shard-${{ matrix.shard }}
           path: integrationTests/test-results/
           retention-days: 7
