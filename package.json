@@ -54,7 +54,7 @@
 	},
 	"devDependencies": {
 		"@harperdb/code-guidelines": "0.0.6",
-		"@harperfast/integration-testing": "0.2.0",
+		"@harperfast/integration-testing": "0.3.0-0",
 		"@playwright/test": "1.52.0",
 		"@types/node": "^20",
 		"harper": "5.0.3",

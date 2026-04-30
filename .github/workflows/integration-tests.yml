@@ -18,9 +18,7 @@ on:
           - '24'
 
 jobs:
-  # TODO: Fix CI setup and re-enable
   generate-node-version-matrix:
-    if: false
     name: Generate Node Version Matrix
     runs-on: ubuntu-latest
     outputs:
