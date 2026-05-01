@@ -13,11 +13,6 @@
 		"esModuleInterop": true,
 		"allowSyntheticDefaultImports": true,
 
-		// Node.js type-stripping
-		"rewriteRelativeImportExtensions": true,
-		"erasableSyntaxOnly": true,
-		"allowImportingTsExtensions": true,
-
 		"skipLibCheck": true
 	}
 }
