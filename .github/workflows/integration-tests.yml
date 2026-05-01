@@ -64,9 +64,6 @@ jobs:
       - name: Build
         run: npm run build || true
 
-      - name: Install fixture dependencies
-        run: npm run install:fixtures
-
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
 
@@ -76,7 +73,6 @@ jobs:
           name: build-artifacts-node-${{ matrix.node-version }}
           path: |
             dist/
-            fixtures/
             package-lock.json
             package.json
           retention-days: 1
@@ -110,6 +106,9 @@ jobs:
       - name: Install dependencies
         # Build step updated package-lock so now this can use ci and be fast
         run: npm ci
+
+      - name: Install fixture dependencies
+        run: npm run install:fixtures
 
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
