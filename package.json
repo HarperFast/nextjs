@@ -36,9 +36,6 @@
 		}
 	},
 	"scripts": {
-		"format": "prettier .",
-		"format:check": "npm run format -- --check",
-		"format:fix": "npm run format -- --write",
 		"build": "tsc -p tsconfig.build.json",
 		"install:fixtures": "node scripts/install-fixtures.js",
 		"test:integration": "playwright test --config integrationTests/playwright.config.ts"
@@ -50,19 +47,21 @@
 		"runtime": {
 			"name": "node",
 			"version": ">=20"
+		},
+		"packageManager": {
+			"name": "npm",
+			"version": ">=10"
 		}
 	},
 	"devDependencies": {
-		"@harperdb/code-guidelines": "0.0.6",
-		"@harperfast/integration-testing": "0.2.0",
-		"@playwright/test": "1.52.0",
+		"@harperfast/integration-testing": "0.3.0",
+		"@playwright/test": "1.59.1",
 		"@types/node": "^20",
-		"harper": "5.0.3",
+		"harper": "5.0.7",
 		"next-14": "npm:next@14.2.35",
 		"next-15": "npm:next@15.5.15",
 		"next-16": "npm:next@16.2.4",
-		"prettier": "3.4.2",
-		"typescript": "5.9.3"
+		"typescript": "6.0.3"
 	},
 	"peerDependencies": {
 		"next": "^14 || ^15 || ^16"
@@ -71,6 +70,5 @@
 		"next": {
 			"optional": false
 		}
-	},
-	"prettier": "@harperdb/code-guidelines/prettier"
+	}
 }

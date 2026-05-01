@@ -4,6 +4,7 @@ import {
 	createHarperContext,
 	setupHarperWithFixture,
 	teardownHarper,
+	HarperStartupError,
 	type HarperContext,
 } from '@harperfast/integration-testing';
 import { test as base, expect } from '@playwright/test';
@@ -22,20 +23,30 @@ export function makeHarperFixture(fixtureName: string) {
 		const fixturePath = join(import.meta.dirname, '..', 'fixtures', fixtureName);
 		const ctx = createHarperContext(fixtureName);
 
-		const started = await setupHarperWithFixture(ctx, fixturePath, {
-			harperBinPath: getHarperBinPath(),
-			startupTimeoutMs: STARTUP_TIMEOUT_MS,
-			config: {
-				logging: {
-					stdStreams: true,
+		let started;
+		try {
+			started = await setupHarperWithFixture(ctx, fixturePath, {
+				harperBinPath: getHarperBinPath(),
+				startupTimeoutMs: STARTUP_TIMEOUT_MS,
+				config: {
+					logging: {
+						stdStreams: true,
+					},
+					applications: {
+						lockdown: 'none',
+						moduleLoader: 'native',
+						dependencyLoader: 'native',
+					},
 				},
-				applications: {
-					lockdown: 'none',
-					moduleLoader: 'native',
-					dependencyLoader: 'native',
-				},
-			},
-		});
+			});
+		} catch (error) {
+			if (error instanceof HarperStartupError) {
+				console.error(`[${fixtureName}] Harper failed to start`);
+				if (error.stdout) console.error(`[${fixtureName}] stdout:\n${error.stdout}`);
+				if (error.stderr) console.error(`[${fixtureName}] stderr:\n${error.stderr}`);
+			}
+			throw error;
+		}
 
 		await use(started.harper);
 

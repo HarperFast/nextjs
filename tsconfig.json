@@ -1,5 +1,5 @@
 {
-	"include": ["src/**/*.ts"],
+	"include": ["src"],
 	"compilerOptions": {
 		// Type checking only by default; use `tsconfig.build.json` for emitting
 		"noEmit": true,
@@ -13,10 +13,6 @@
 		"esModuleInterop": true,
 		"allowSyntheticDefaultImports": true,
 
-		// Node.js type-stripping
-		"rewriteRelativeImportExtensions": true,
-		"erasableSyntaxOnly": true,
-		"verbatimModuleSyntax": true,
-		"allowImportingTsExtensions": true
+		"skipLibCheck": true
 	}
 }
