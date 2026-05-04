@@ -57,7 +57,7 @@
 		"@harperfast/integration-testing": "0.3.0",
 		"@playwright/test": "1.59.1",
 		"@types/node": "^20",
-		"harper": "5.0.7",
+		"harper": "5.0.9",
 		"next-14": "npm:next@14.2.35",
 		"next-15": "npm:next@15.5.15",
 		"next-16": "npm:next@16.2.4",

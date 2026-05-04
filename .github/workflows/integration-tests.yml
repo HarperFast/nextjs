@@ -60,7 +60,7 @@ jobs:
         run: npm ci
 
       - name: Build
-        run: npm run build || true
+        run: npm run build
 
       - name: Install fixture dependencies
         run: npm run install:fixtures
