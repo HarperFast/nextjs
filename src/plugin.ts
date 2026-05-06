@@ -23,6 +23,7 @@ interface NextPluginConfig extends Config {
 	prebuilt: boolean;
 	runFirst: boolean;
 	securePort?: number;
+	webpack: boolean;
 }
 
 // Bringing this forward from extension since some validation is better than none.
@@ -68,6 +69,7 @@ function resolveConfig(scope: Scope): NextPluginConfig {
 	assertType('prebuilt', options.prebuilt, 'boolean');
 	assertType('runFirst', options.runFirst, 'boolean');
 	assertType('securePort', options.securePort, 'number');
+	assertType('webpack', options.webpack, 'boolean');
 
 	// TODO: Remove type casts when we have more proper plugin option validation from core
 	return {
@@ -79,6 +81,7 @@ function resolveConfig(scope: Scope): NextPluginConfig {
 		prebuilt: (options.prebuilt as boolean) ?? false,
 		runFirst: (options.runFirst as boolean) ?? false,
 		securePort: options.securePort as number,
+		webpack: (options.webpack as boolean) ?? false,
 	} satisfies NextPluginConfig;
 }
 
@@ -305,7 +308,7 @@ async function build(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 				await next.build(
 					{
 						mangling: true,
-						webpack: true,
+						webpack: config.webpack,
 						experimentalDebugMemoryUsage: false,
 						experimentalBuildMode: 'default',
 					},
@@ -341,7 +344,7 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 			app = next.server({ dir: scope.directory, dev: config.dev, turbopack: false });
 			break;
 		case 16:
-			app = next.server({ dir: scope.directory, dev: config.dev, turbopack: false });
+			app = next.server({ dir: scope.directory, dev: config.dev, ...(config.webpack && { webpack: true }) });
 			break;
 	}
 
