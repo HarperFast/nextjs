@@ -197,6 +197,11 @@ export async function handleApplication(scope: Scope) {
 		config.bundler = next.version >= 16 ? 'turbopack' : 'webpack';
 	}
 
+	if (config.bundler === 'turbopack' && next.version === 14) {
+		scope.logger.error?.('Turbopack is not supported for Next.js v14. Falling back to webpack.');
+		config.bundler = 'webpack';
+	}
+
 	scope.logger.debug?.(`Detected Next.js version: ${next.version}`);
 
 	if (config.prebuilt) {
