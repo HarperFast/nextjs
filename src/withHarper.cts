@@ -32,6 +32,9 @@ export function withHarper(config: NextConfig, harperConfig: HarperConfig = {}):
 
 			return config;
 		},
+		turbopack: {
+			...config.turbopack,
+		},
 		serverExternalPackages: [...(config.serverExternalPackages ?? []), 'harperdb', 'harper', 'harper-pro'],
 		...(experimentalHarperCache && { cacheHandler: join(__dirname, 'CacheHandler.cjs') }),
 	};

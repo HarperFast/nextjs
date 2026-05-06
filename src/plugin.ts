@@ -14,8 +14,11 @@ import type NextBuildModule15 from 'next-15/dist/cli/next-build.d.ts';
 import type NextModule16 from 'next-16';
 import type NextBuildModule16 from 'next-16/dist/cli/next-build.d.ts';
 
+type Bundler = 'webpack' | 'turbopack';
+
 interface NextPluginConfig extends Config {
 	buildOnly: boolean;
+	bundler: Bundler;
 	dev: boolean;
 	// @ts-expect-error
 	files?: FilesOption;
@@ -63,15 +66,22 @@ function resolveConfig(scope: Scope): NextPluginConfig {
 	}
 
 	assertType('buildOnly', options.buildOnly, 'boolean');
+	assertType('bundler', options.bundler, 'string');
 	assertType('dev', options.dev, 'boolean');
 	assertType('port', options.port, 'number');
 	assertType('prebuilt', options.prebuilt, 'boolean');
 	assertType('runFirst', options.runFirst, 'boolean');
 	assertType('securePort', options.securePort, 'number');
 
+	if (options.bundler && options.bundler !== 'webpack' && options.bundler !== 'turbopack') {
+		throw new Error(`bundler must be "webpack" or "turbopack". Received: "${options.bundler}"`);
+	}
+
 	// TODO: Remove type casts when we have more proper plugin option validation from core
 	return {
 		buildOnly: (options.buildOnly as boolean) ?? false,
+		// bundler default is set later in handleApplication() based on the detected Next.js version
+		bundler: options.bundler as Bundler,
 		dev: (options.dev as boolean) ?? false,
 		// @ts-expect-error
 		files: options.files,
@@ -180,6 +190,17 @@ export async function handleApplication(scope: Scope) {
 	// }
 
 	const next = importNext(scope);
+
+	// Set the bundler default based on the detected Next.js version if not explicitly configured.
+	// Next.js v16 defaults to turbopack; v14 and v15 default to webpack.
+	if (!config.bundler) {
+		config.bundler = next.version >= 16 ? 'turbopack' : 'webpack';
+	}
+
+	if (config.bundler === 'turbopack' && next.version === 14) {
+		scope.logger.error?.('Turbopack is not supported for Next.js v14. Falling back to webpack.');
+		config.bundler = 'webpack';
+	}
 
 	scope.logger.debug?.(`Detected Next.js version: ${next.version}`);
 
@@ -294,7 +315,7 @@ async function build(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 					{
 						lint: false,
 						mangling: true,
-						turbopack: false,
+						...(config.bundler === 'turbopack' && { turbopack: true }),
 						experimentalDebugMemoryUsage: false,
 						experimentalBuildMode: 'default',
 					},
@@ -305,7 +326,7 @@ async function build(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 				await next.build(
 					{
 						mangling: true,
-						webpack: true,
+						...(config.bundler === 'webpack' && { webpack: true }),
 						experimentalDebugMemoryUsage: false,
 						experimentalBuildMode: 'default',
 					},
@@ -338,10 +359,10 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 			app = next.server({ dir: scope.directory, dev: config.dev });
 			break;
 		case 15:
-			app = next.server({ dir: scope.directory, dev: config.dev, turbopack: false });
+			app = next.server({ dir: scope.directory, dev: config.dev, ...(config.bundler === 'turbopack' && { turbopack: true }) });
 			break;
 		case 16:
-			app = next.server({ dir: scope.directory, dev: config.dev, turbopack: false });
+			app = next.server({ dir: scope.directory, dev: config.dev, ...(config.bundler === 'webpack' && { webpack: true }) });
 			break;
 	}
 
