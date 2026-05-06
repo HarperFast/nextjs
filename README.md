@@ -135,6 +135,20 @@ export default withHarper(
 
 All plugin options are configured in `config.yaml` under the `@harperfast/nextjs` key. All options are optional.
 
+### `bundler: 'webpack' | 'turbopack'`
+
+Selects the bundler used for building and serving the Next.js application. The default depends on the detected Next.js version:
+
+- **Next.js v16**: defaults to `turbopack` (matching the Next.js v16 default)
+- **Next.js v15**: defaults to `webpack` (matching the Next.js v15 default)
+- **Next.js v14**: always uses `webpack` (turbopack is not supported)
+
+```yaml
+'@harperfast/nextjs':
+  package: '@harperfast/nextjs'
+  bundler: webpack
+```
+
 ### `dev: boolean`
 
 Enables Next.js development mode with hot module replacement (HMR). Defaults to `false`.
