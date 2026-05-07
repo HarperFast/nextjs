@@ -1,3 +1,9 @@
-import { withHarper } from '@harperfast/nextjs';
+import { join } from 'path';
 
-export default withHarper({}, { experimentalHarperCache: true });
+export default {
+	// turbopack: {
+	// 	root: '../../../../',
+	// },
+	serverExternalPackages: ['harper', '@harperfast/nextjs'],
+	cacheHandler: join(import.meta.dirname, 'node_modules', '@harperfast', 'nextjs', 'dist', 'CacheHandler.cjs'),
+};
