@@ -119,10 +119,7 @@ export default class HarperCacheHandler implements CacheHandler {
 		const record = await table.get(key);
 		if (!record) return null;
 
-		const recordTags =
-			typeof record.tags === 'string' && record.tags.length > 0
-				? record.tags.split(',').filter(Boolean)
-				: [];
+		const recordTags = Array.isArray(record.tags) ? (record.tags as string[]) : [];
 
 		const ctxTags =
 			'tags' in ctx && Array.isArray(ctx.tags)
@@ -148,7 +145,7 @@ export default class HarperCacheHandler implements CacheHandler {
 		const tags = extractTags(data, ctx);
 		await table.put(key, {
 			data,
-			tags: tags.join(','),
+			tags,
 		});
 	}
 
