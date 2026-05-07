@@ -183,10 +183,10 @@ The `files` option is now optional with plugins. This make configuration simpler
 Glob pattern specifying which files Harper should watch for changes. Example: `'/app/*'`.
 -->
 
-## Caching
+## Caching (Work In Progress)
 
 > [!NOTE]
-> The Harper cache handler is still gated behind `experimentalHarperCache`. The runtime behaviour described below is implemented, but the option name signals that the contract may evolve.
+> The Harper cache handler is still gated behind `experimentalHarperCache`. The runtime behavior described below is implemented, but the option name signals that the contract may evolve.
 
 `@harperfast/nextjs` includes a Harper-backed cache handler for Next.js [Incremental Static Regeneration (ISR)](https://nextjs.org/docs/app/guides/incremental-static-regeneration), the [Data Cache (`fetch()`)](https://nextjs.org/docs/app/deep-dive/caching#data-cache), and [`unstable_cache`](https://nextjs.org/docs/app/api-reference/functions/unstable_cache). Cached entries live in Harper instead of the worker's local filesystem, so a cache write on one node is visible to every node in the cluster.
 
