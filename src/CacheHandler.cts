@@ -12,7 +12,7 @@ import type {
 	SetIncrementalResponseCacheContext,
 } from 'next/dist/server/response-cache/index.d.ts';
 
-import { databases } from 'harper';
+import type { databases as DatabasesType } from 'harper';
 
 const NEXT_CACHE_TAGS_HEADER = 'x-next-cache-tags';
 
@@ -23,8 +23,19 @@ const cacheInvalidations = new Map<string, number>();
 
 let subscriptionInitialized = false;
 
+// `databases` is a Harper-provided global. Access it lazily so that loading
+// this module from a non-Harper context (e.g. a turbopack build worker that
+// resolves the cacheHandler path) does not pull in the harper runtime — which
+// would register native worker hooks a second time and crash with
+// "Worker creator already registered".
+function getDatabases(): typeof DatabasesType | undefined {
+	return (globalThis as { databases?: typeof DatabasesType }).databases;
+}
+
 async function initializeSubscription(): Promise<void> {
 	if (subscriptionInitialized) return;
+	const databases = getDatabases();
+	if (!databases) return;
 	subscriptionInitialized = true;
 
 	// Harper's TypeScript types require RequestTarget/SubscriptionRequest objects,
@@ -115,6 +126,9 @@ export default class HarperCacheHandler implements CacheHandler {
 		key: string,
 		ctx: GetIncrementalFetchCacheContext | GetIncrementalResponseCacheContext
 	): Promise<CacheHandlerValue | null> {
+		const databases = getDatabases();
+		if (!databases) return null;
+
 		const table = databases.harperfast_nextjs.nextjs_isr_cache;
 		const record = await table.get(key);
 		if (!record) return null;
@@ -141,6 +155,9 @@ export default class HarperCacheHandler implements CacheHandler {
 		data: IncrementalCacheValue | null,
 		ctx: SetIncrementalFetchCacheContext | SetIncrementalResponseCacheContext
 	): Promise<void> {
+		const databases = getDatabases();
+		if (!databases) return;
+
 		const table = databases.harperfast_nextjs.nextjs_isr_cache;
 		const tags = extractTags(data, ctx);
 		await table.put(key, {
@@ -152,6 +169,9 @@ export default class HarperCacheHandler implements CacheHandler {
 	async revalidateTag(tags: string | string[]): Promise<void> {
 		const tagList = typeof tags === 'string' ? [tags] : tags;
 		if (tagList.length === 0) return;
+
+		const databases = getDatabases();
+		if (!databases) return;
 
 		const table = databases.harperfast_nextjs.nextjs_cache_invalidation;
 		const timestamp = Date.now();
