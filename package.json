@@ -54,7 +54,7 @@
 		}
 	},
 	"devDependencies": {
-		"@harperfast/integration-testing": "0.3.0",
+		"@harperfast/integration-testing": "0.3.1",
 		"@playwright/test": "1.59.1",
 		"@types/node": "^20",
 		"harper": "5.0.9",

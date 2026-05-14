@@ -103,7 +103,7 @@ export default async function Dog({ params }) {
 
 ## `withHarper()`
 
-`withHarper(config: NextConfig, harperConfig?: HarperConfig): NextConfig`
+`withHarper(config?: NextConfig): NextConfig`
 
 A configuration helper that wraps your Next.js config. It automatically adds `harper` and `harper-pro` to `serverExternalPackages` so Harper's native dependencies are treated correctly by the bundler.
 
@@ -116,19 +116,6 @@ const { withHarper } = require('@harperfast/nextjs');
 module.exports = withHarper({
 	// Any valid Next.js configuration options
 });
-```
-
-### `experimentalHarperCache: boolean`
-
-Enables the built-in Harper [cache handler](#caching-work-in-progress). Defaults to `false`.
-
-```js
-export default withHarper(
-	{
-		/* Next.js config */
-	},
-	{ experimentalHarperCache: true }
-);
 ```
 
 ## Options
@@ -185,20 +172,37 @@ Glob pattern specifying which files Harper should watch for changes. Example: `'
 
 ## Caching (Work In Progress)
 
-> [!NOTE]
-> The Harper cache handler is still gated behind `experimentalHarperCache`. The runtime behavior described below is implemented, but the option name signals that the contract may evolve.
-
 `@harperfast/nextjs` includes a Harper-backed cache handler for Next.js [Incremental Static Regeneration (ISR)](https://nextjs.org/docs/app/guides/incremental-static-regeneration), the [Data Cache (`fetch()`)](https://nextjs.org/docs/app/deep-dive/caching#data-cache), and [`unstable_cache`](https://nextjs.org/docs/app/api-reference/functions/unstable_cache). Cached entries live in Harper instead of the worker's local filesystem, so a cache write on one node is visible to every node in the cluster.
 
 ### Enabling
 
-Set `experimentalHarperCache: true` in [`withHarper()`](#withharper):
+Set the `cacheHandler` path using the `cacheHandlerPath()` helper. This helper resolves the cache handler relative to your config file, which is required by Turbopack:
 
 ```js
-// next.config.mjs
-import { withHarper } from '@harperfast/nextjs';
+// next.config.js (CommonJS)
+const { withHarper, cacheHandlerPath } = require('@harperfast/nextjs');
 
-export default withHarper({}, { experimentalHarperCache: true });
+module.exports = withHarper({
+	cacheHandler: cacheHandlerPath(__dirname),
+});
+```
+
+```js
+// next.config.mjs (ESM)
+import { withHarper, cacheHandlerPath } from '@harperfast/nextjs';
+
+export default withHarper({
+	cacheHandler: cacheHandlerPath(import.meta.dirname),
+});
+```
+
+```ts
+// next.config.ts (TypeScript)
+import { withHarper, cacheHandlerPath } from '@harperfast/nextjs';
+
+export default withHarper({
+	cacheHandler: cacheHandlerPath(import.meta.dirname),
+});
 ```
 
 ### Tag invalidation
