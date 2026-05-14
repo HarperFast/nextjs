@@ -160,10 +160,7 @@ export default class HarperCacheHandler implements CacheHandler {
 
 		const table = databases.harperfast_nextjs.nextjs_isr_cache;
 		const tags = extractTags(data, ctx);
-		await table.put(key, {
-			data,
-			tags,
-		});
+		await table.put(key, { data, tags });
 	}
 
 	async revalidateTag(tags: string | string[]): Promise<void> {

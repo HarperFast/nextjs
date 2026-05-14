@@ -6,7 +6,7 @@ type NextBuildInfo @table(database: "harperfast_nextjs", table: "nextjs_build_in
 
 type NextISRCache @table(database: "harperfast_nextjs", table: "nextjs_isr_cache") {
 	id: String @primaryKey
-	data: String
+	data: Any
 	tags: [String]
 	lastModified: Long @updatedTime
 }
