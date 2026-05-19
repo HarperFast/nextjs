@@ -103,7 +103,7 @@ export default async function Dog({ params }) {
 
 ## `withHarper()`
 
-`withHarper(config: NextConfig, harperConfig?: HarperConfig): NextConfig`
+`withHarper(config?: NextConfig): NextConfig`
 
 A configuration helper that wraps your Next.js config. It automatically adds `harper` and `harper-pro` to `serverExternalPackages` so Harper's native dependencies are treated correctly by the bundler.
 
@@ -116,19 +116,6 @@ const { withHarper } = require('@harperfast/nextjs');
 module.exports = withHarper({
 	// Any valid Next.js configuration options
 });
-```
-
-### `experimentalHarperCache: boolean`
-
-Enables the built-in Harper [cache handler](#caching-work-in-progress). Defaults to `false`.
-
-```js
-export default withHarper(
-	{
-		/* Next.js config */
-	},
-	{ experimentalHarperCache: true }
-);
 ```
 
 ## Options
@@ -185,20 +172,94 @@ Glob pattern specifying which files Harper should watch for changes. Example: `'
 
 ## Caching (Work In Progress)
 
-> This custom caching handler is currently a WIP and is actively being developed.
+`@harperfast/nextjs` includes a Harper-backed cache handler for Next.js [Incremental Static Regeneration (ISR)](https://nextjs.org/docs/app/guides/incremental-static-regeneration), the [Data Cache (`fetch()`)](https://nextjs.org/docs/app/deep-dive/caching#data-cache), and [`unstable_cache`](https://nextjs.org/docs/app/api-reference/functions/unstable_cache). Cached entries live in Harper instead of the worker's local filesystem, so a cache write on one node is visible to every node in the cluster.
 
-`@harperfast/nextjs` includes a built-in cache handler for Next.js [Incremental Static Regeneration (ISR)](https://nextjs.org/docs/app/guides/incremental-static-regeneration). Instead of storing cached pages on the file system, cached data is stored in Harper's database, making it available across all nodes in your Harper cluster.
+### Enabling
 
-Enable it via the `experimentalHarperCache` option in [`withHarper()`](#withharper):
+Set the `cacheHandler` path using the `cacheHandlerPath()` helper. This helper resolves the cache handler relative to your config file, which is required by Turbopack:
 
 ```js
-export default withHarper(
-	{
-		/* Next.js config */
-	},
-	{ experimentalHarperCache: true }
-);
+// next.config.js (CommonJS)
+const { withHarper, cacheHandlerPath } = require('@harperfast/nextjs');
+
+module.exports = withHarper({
+	cacheHandler: cacheHandlerPath(__dirname),
+});
 ```
+
+```js
+// next.config.mjs (ESM)
+import { withHarper, cacheHandlerPath } from '@harperfast/nextjs';
+
+export default withHarper({
+	cacheHandler: cacheHandlerPath(import.meta.dirname),
+});
+```
+
+```ts
+// next.config.ts (TypeScript)
+import { withHarper, cacheHandlerPath } from '@harperfast/nextjs';
+
+export default withHarper({
+	cacheHandler: cacheHandlerPath(import.meta.dirname),
+});
+```
+
+### Tag invalidation
+
+[`revalidateTag()`](https://nextjs.org/docs/app/api-reference/functions/revalidateTag) is supported and propagates across the cluster automatically. A typical flow:
+
+```js
+// app/products/[id]/page.js
+import { unstable_cache } from 'next/cache';
+
+const getProduct = unstable_cache(
+	async (id) => {
+		const res = await fetch(`https://api.example.com/products/${id}`);
+		return res.json();
+	},
+	['product'],
+	{ tags: ['products'], revalidate: 3600 }
+);
+
+export default async function ProductPage({ params }) {
+	const product = await getProduct(params.id);
+	return <h1>{product.name}</h1>;
+}
+```
+
+```js
+// app/api/revalidate/route.js
+import { revalidateTag } from 'next/cache';
+import { NextResponse } from 'next/server';
+
+export async function POST(request) {
+	const tag = new URL(request.url).searchParams.get('tag');
+	revalidateTag(tag);
+	return NextResponse.json({ revalidated: true });
+}
+```
+
+`fetch()` calls with `next: { tags: [...] }` and the `'use cache'` directive (with `cacheTag()`) are also supported — anywhere Next.js attaches tags to a cached value, the handler will pick them up.
+
+### How invalidation works
+
+The cache handler uses a **soft-invalidation** model:
+
+1. `revalidateTag(tag)` writes a `{ tag, timestamp }` row to the `nextjs_cache_invalidation` table and updates an in-memory map in the calling worker.
+2. Every other Harper worker subscribes to that table and updates its own map when the row is replicated — typically within milliseconds.
+3. On the next `cache.get()`, if any of the cached entry's tags has an invalidation timestamp newer than the entry's `lastModified`, the handler returns `null` and Next.js regenerates the entry. The new write replaces the row with a fresh `lastModified`, naturally restoring "fresh" status.
+
+There is no background sweep that hard-deletes invalidated rows; stale rows are overwritten by Next.js the next time the entry is regenerated. The `nextjs_cache_invalidation` rows themselves expire after 7 days so abandoned tags don't accumulate.
+
+### Schema
+
+Enabling the cache handler adds two tables to the `harperfast_nextjs` database:
+
+| Table | Purpose |
+| --- | --- |
+| `nextjs_isr_cache` | One row per cached entry. Stores `data` (the Next.js `IncrementalCacheValue`), `tags` (the tags attached to the entry), and `lastModified`. |
+| `nextjs_cache_invalidation` | One row per invalidated tag. `id` is the tag itself; `timestamp` is when `revalidateTag` was called. Auto-expires after 7 days. |
 
 ## Contributing
 

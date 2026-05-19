@@ -4,8 +4,14 @@ type NextBuildInfo @table(database: "harperfast_nextjs", table: "nextjs_build_in
 	status: String
 }
 
-type NextISRCache @table(database: "harperfast_nextjs", table: "nextjs_isr_cache") {
+type NextISRCache @table(database: "harperfast_nextjs", table: "nextjs_isr_cache", expiration: 604800) {
 	id: String @primaryKey
-	data: String
+	data: Any
+	tags: [String]
 	lastModified: Long @updatedTime
+}
+
+type NextCacheInvalidation @table(database: "harperfast_nextjs", table: "nextjs_cache_invalidation", expiration: 604800) {
+	id: String @primaryKey
+	timestamp: Long
 }

@@ -34,8 +34,9 @@ export function makeHarperFixture(fixtureName: string) {
 					},
 					applications: {
 						lockdown: 'none',
-						moduleLoader: 'native',
+						moduleLoader: 'none',
 						dependencyLoader: 'native',
+						allowedDirectory: 'any'
 					},
 				},
 			});
