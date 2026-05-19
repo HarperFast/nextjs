@@ -261,11 +261,6 @@ Enabling the cache handler adds two tables to the `harperfast_nextjs` database:
 | `nextjs_isr_cache` | One row per cached entry. Stores `data` (the Next.js `IncrementalCacheValue`), `tags` (the tags attached to the entry), and `lastModified`. |
 | `nextjs_cache_invalidation` | One row per invalidated tag. `id` is the tag itself; `timestamp` is when `revalidateTag` was called. Auto-expires after 7 days. |
 
-### Limitations
-
-- `revalidatePath()` is not yet implemented.
-- Group-based invalidation (revalidate everything in a logical bucket) is not exposed; tag the entries with a shared tag and call `revalidateTag()` instead.
-
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
