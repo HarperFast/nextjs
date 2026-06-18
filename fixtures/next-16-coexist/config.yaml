@@ -1,0 +1,7 @@
+rest: true
+
+jsResource:
+  files: greeting.js
+
+'@harperfast/nextjs':
+  package: '@harperfast/nextjs'
