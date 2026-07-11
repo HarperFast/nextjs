@@ -1,5 +1,0 @@
-loadEnv:
-  files: .env.secrets
-
-'@harperfast/nextjs':
-  package: '@harperfast/nextjs'
