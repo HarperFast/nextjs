@@ -1,2 +1,13 @@
+rest: true
+
+# Startup secrets injection: loadEnv runs before @harperfast/nextjs, so
+# MOCK_API_KEY is present in process.env before Next.js builds/starts.
+loadEnv:
+  files: .env.secrets
+
+# A plain Harper REST resource that must coexist with Next.js on the same port.
+jsResource:
+  files: greeting.js
+
 '@harperfast/nextjs':
   package: '@harperfast/nextjs'

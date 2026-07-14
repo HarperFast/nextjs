@@ -4,6 +4,18 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node.js version'
+        required: false
+        type: string
+        default: 'all'
+      harper_ref:
+        description: 'HarperFast/harper ref to test against (branch, SHA, or tag). Empty = use pinned version.'
+        required: false
+        type: string
+        default: ''
   workflow_dispatch:
     inputs:
       node-version:
@@ -16,6 +28,11 @@ on:
           - '20'
           - '22'
           - '24'
+      harper_ref:
+        description: 'HarperFast/harper ref to test against (branch, SHA, or tag). Empty = use pinned version.'
+        required: false
+        type: string
+        default: ''
 
 jobs:
   generate-node-version-matrix:
@@ -31,10 +48,11 @@ jobs:
       - name: Set Node versions
         id: set-node-versions
         run: |
-          if [ "${{ github.event.inputs.node-version }}" == "all" ] || [ -z "${{ github.event.inputs.node-version }}" ]; then
+          INPUT="${{ inputs.node-version }}"
+          if [ "$INPUT" == "all" ] || [ -z "$INPUT" ]; then
             echo "node-versions=[20, 22, 24]" >> $GITHUB_OUTPUT
           else
-            echo "node-versions=[${{ github.event.inputs.node-version }}]" >> $GITHUB_OUTPUT
+            echo "node-versions=[$INPUT]" >> $GITHUB_OUTPUT
           fi
 
   integration-tests:
@@ -59,6 +77,25 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Checkout harper override
+        if: ${{ inputs.harper_ref != '' }}
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: HarperFast/harper
+          ref: ${{ inputs.harper_ref }}
+          path: harper-override
+
+      - name: Build and install harper override
+        if: ${{ inputs.harper_ref != '' }}
+        run: |
+          cd "$GITHUB_WORKSPACE/harper-override"
+          npm ci
+          npm run build
+          TARBALL=$(npm pack --json | jq -r '.[0].filename')
+          mv "$TARBALL" /tmp/harper-override.tgz
+          cd "$GITHUB_WORKSPACE"
+          npm install --save-dev /tmp/harper-override.tgz
+
       - name: Build
         run: npm run build
 
@@ -70,7 +107,7 @@ jobs:
 
       - name: Run integration tests
         run: npm run test:integration
-        timeout-minutes: 5
+        timeout-minutes: 15
         env:
           HARPER_INTEGRATION_TEST_LOG_DIR: /tmp/harper-test-logs
           FORCE_COLOR: '1'
