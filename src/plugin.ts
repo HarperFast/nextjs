@@ -5,6 +5,8 @@ import { parse as urlParse } from 'node:url';
 import { join } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 
+import { withBuildLock } from './buildLock.js';
+
 import type NextModule14 from 'next-14';
 import type NextBuildModule14 from 'next-14/dist/cli/next-build.d.ts';
 
@@ -265,32 +267,17 @@ export async function handleApplication(scope: Scope) {
 }
 
 async function build(scope: Scope, config: NextPluginConfig, next: NextPackage) {
-	const buildInfo = await databases.harperfast_nextjs.nextjs_build_info.get(scope.appName);
+	// Serialize builds across Harper worker threads (see buildLock.ts). `withBuildLock` decides whether
+	// this worker builds, reuses a fresh build, or waits for a sibling; it only invokes `runBuild` (and
+	// only on the one worker that wins the claim) when a build is actually needed.
+	await withBuildLock(scope, {
+		getBuildId: () => getBuildId(scope),
+		runBuild: () => runNextBuild(scope, config, next),
+	});
+}
 
-	if (buildInfo && Date.now() - buildInfo.getUpdatedTime() < 5000) {
-		// If the build info record is marked as "failure" just return immediately
-		// avoids building (and failing) on every thread
-		if (buildInfo.status === 'failure') {
-			scope.logger.debug?.(`Failure build of ${scope.appName} detected`);
-			return;
-		}
-
-		// If the build info record is marked as "success"
-		if (buildInfo.status === 'success') {
-			// then validate the BUILD_ID value
-			const buildId = getBuildId(scope);
-			if (buildId === buildInfo.buildId) {
-				scope.logger.debug?.(`Fresh build of ${scope.appName} (id: ${buildInfo.buildId}) detected`);
-				// fresh build
-				return;
-			}
-		}
-	}
-
-	// Otherwise we have a stale build (or no build info at all) and now we can proceed with building
-
-	scope.logger.debug?.(`Building Next.js application at ${scope.directory}`);
-
+/** Runs `next build` for the detected Next.js version and returns the resulting BUILD_ID. */
+async function runNextBuild(scope: Scope, config: NextPluginConfig, next: NextPackage): Promise<string> {
 	// --expose-internals is set in Harper's worker execArgv but is not allowed in NODE_OPTIONS.
 	// Next.js reads process.execArgv to forward flags to its own child workers via NODE_OPTIONS,
 	// which causes Node to reject the build worker. Strip it before building and restore after.
@@ -335,16 +322,10 @@ async function build(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 				break;
 		}
 
+		// Read BUILD_ID directly (not via getBuildId) so a build that completed without one throws and is
+		// recorded as a failure. Trim it so it matches getBuildId() in the lock's fresh-build check.
 		const buildIdPath = join(scope.directory, '.next', 'BUILD_ID');
-		const buildId = readFileSync(buildIdPath, 'utf-8');
-		// Update the build info record
-		await databases.harperfast_nextjs.nextjs_build_info.put(scope.appName, { buildId, status: 'success' });
-		scope.logger.debug?.(`Successful build for ${scope.appName} (id ${buildId})`);
-		return;
-	} catch (error) {
-		await databases.harperfast_nextjs.nextjs_build_info.put(scope.appName, { buildId: null, status: 'failure' });
-		scope.logger.debug?.(`Error building ${scope.appName}`);
-		throw error;
+		return readFileSync(buildIdPath, 'utf-8').trim();
 	} finally {
 		if (exposeInternalsIdx !== -1) process.execArgv.splice(exposeInternalsIdx, 0, '--expose-internals');
 	}

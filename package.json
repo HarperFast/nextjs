@@ -24,7 +24,8 @@
 	},
 	"license": "Apache-2.0",
 	"files": [
-		"dist",
+		"dist/**",
+		"!dist/**/*.test.*",
 		"config.yaml",
 		"schema.graphql"
 	],
@@ -38,6 +39,7 @@
 	"scripts": {
 		"build": "tsc -p tsconfig.build.json",
 		"install:fixtures": "node scripts/install-fixtures.js",
+		"test": "npm run build && node --test \"dist/**/*.test.js\"",
 		"test:integration": "playwright test --config integrationTests/playwright.config.ts"
 	},
 	"engines": {

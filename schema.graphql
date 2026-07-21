@@ -1,3 +1,8 @@
+# Coordinates production builds across Harper worker threads (and processes sharing a database) so the
+# app is built once per instance rather than once per worker. A worker claims the per-app record with
+# status "building" before compiling; sibling workers observe the fresh claim and wait rather than
+# building into the same .next concurrently. Once built, `status` is "success" (with the resulting
+# `buildId`) or "failure". See the build() coordination logic in src/plugin.ts.
 type NextBuildInfo @table(database: "harperfast_nextjs", table: "nextjs_build_info") {
 	appName: String @primaryKey
 	buildId: String
