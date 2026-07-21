@@ -7,20 +7,26 @@ import { setTimeout as sleep } from 'node:timers/promises';
 // one worker deletes `.next/BUILD_ID` while another is reading it → `ENOENT` → the build worker exits and
 // nothing serves (issue #52). To serialize builds, a worker claims the shared build-info record with
 // status `building` before compiling; sibling workers observe the fresh claim and wait for it to finish
-// rather than building in parallel. This mirrors the `@harperfast/vite` `buildLock` pattern.
+// rather than building in parallel. This mirrors the `@harperfast/vite` `buildLock` pattern, plus a
+// heartbeat: the builder re-stamps its claim on an interval so an in-progress build of any length stays
+// fresh, while a crashed builder's claim still goes stale (and is reclaimed) within STALE_CLAIM_MS.
 
 const DATABASE = 'harperfast_nextjs';
 const TABLE = 'nextjs_build_info';
 
 // A completed build (`success`/`failure`) is reused for this long; after it, a restart triggers a rebuild.
 const FRESH_BUILD_MS = 5000;
-// A `building` claim older than this is treated as abandoned — e.g. the worker holding it crashed (the
-// issue notes `process.exit(1)` in a build worker is swallowed to keep Harper alive). Must exceed the
-// longest expected `next build`.
-const STALE_CLAIM_MS = 5 * 60 * 1000;
-// How often a waiting worker re-checks the claim, and how long it waits before building anyway.
+// While building, the claiming worker re-stamps its `building` record on this interval (a heartbeat) so a
+// live build never looks abandoned, no matter how long `next build` takes.
+const HEARTBEAT_MS = 30 * 1000;
+// A `building` claim is treated as abandoned only once it has gone this long without a heartbeat — i.e. the
+// worker holding it crashed (the issue notes `process.exit(1)` in a build worker is swallowed to keep
+// Harper alive). This bounds crash detection; it does NOT need to exceed the build duration, because the
+// heartbeat keeps a live claim fresh. Must be comfortably larger than HEARTBEAT_MS to tolerate the event
+// loop being busy during a build.
+const STALE_CLAIM_MS = 2 * 60 * 1000;
+// How often a waiting worker re-checks the claim.
 const CLAIM_POLL_MS = 150;
-const CLAIM_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
 
 /** A build-info record as Harper returns it from `table.get`. */
 interface BuildInfoRecord {
@@ -38,6 +44,29 @@ interface BuildInfoTable {
 /** The build-info table, or `undefined` when running outside Harper (e.g. unit tests). */
 function buildInfoTable(): BuildInfoTable | undefined {
 	return (databases as unknown as Record<string, Record<string, BuildInfoTable>>)?.[DATABASE]?.[TABLE];
+}
+
+/**
+ * Re-stamp the `building` claim on an interval so a live (possibly long) build never looks abandoned to
+ * waiting workers. Returns a stop function that halts the heartbeat and awaits any in-flight re-stamp, so
+ * the caller can then write the terminal (`success`/`failure`) record as the last word on the claim.
+ */
+function startClaimHeartbeat(table: BuildInfoTable, key: string, scope: Scope): () => Promise<void> {
+	let stopped = false;
+	let inFlight: Promise<unknown> = Promise.resolve();
+	const timer = setInterval(() => {
+		if (stopped) return;
+		inFlight = Promise.resolve(table.put(key, { buildId: null, status: 'building' })).catch((error) => {
+			scope.logger.debug?.(`Heartbeat for ${key} build claim failed`, error);
+		});
+	}, HEARTBEAT_MS);
+	// Don't let the heartbeat timer keep the process alive on its own.
+	timer.unref?.();
+	return async () => {
+		stopped = true;
+		clearInterval(timer);
+		await inFlight;
+	};
 }
 
 export interface BuildLockDeps {
@@ -66,17 +95,13 @@ export async function withBuildLock(scope: Scope, deps: BuildLockDeps): Promise<
 	// Wait for any build already in progress on a sibling worker, then decide whether we still need to
 	// build. Looping means that once a claim clears we re-read the record it produced (fresh success or
 	// failure) instead of racing straight into our own build.
-	const waitStart = Date.now();
 	while (true) {
 		const buildInfo = await table.get(key);
 		const age = buildInfo ? Date.now() - buildInfo.getUpdatedTime() : Infinity;
 
-		// Another worker is actively building. Poll-wait for it to finish, then re-evaluate.
+		// Another worker is actively building, and its heartbeat is fresh. Poll-wait however long the build
+		// takes; we only stop waiting once the claim clears (success/failure) or goes stale (builder died).
 		if (buildInfo?.status === 'building' && age < STALE_CLAIM_MS) {
-			if (Date.now() - waitStart > CLAIM_WAIT_TIMEOUT_MS) {
-				scope.logger.warn?.(`Timed out waiting for another worker to build ${key}; building anyway`);
-				break;
-			}
 			scope.logger.debug?.(`Another worker is building ${key}; waiting`);
 			await sleep(CLAIM_POLL_MS);
 			continue;
@@ -102,16 +127,22 @@ export async function withBuildLock(scope: Scope, deps: BuildLockDeps): Promise<
 	}
 
 	// Claim the build so sibling workers wait (above) instead of compiling into the same `.next`
-	// concurrently. `getUpdatedTime()` on this record is what the checks above compare against.
+	// concurrently. `getUpdatedTime()` on this record is what the checks above compare against, and the
+	// heartbeat keeps it fresh for the duration of the build.
 	await table.put(key, { buildId: null, status: 'building' });
 
 	scope.logger.debug?.(`Building Next.js application at ${scope.directory}`);
 
+	const stopHeartbeat = startClaimHeartbeat(table, key, scope);
 	try {
 		const buildId = await deps.runBuild();
+		// Stop the heartbeat before writing the terminal record so no stray re-stamp can revert it to
+		// `building` afterward.
+		await stopHeartbeat();
 		await table.put(key, { buildId, status: 'success' });
 		scope.logger.debug?.(`Successful build for ${key} (id ${buildId})`);
 	} catch (error) {
+		await stopHeartbeat();
 		await table.put(key, { buildId: null, status: 'failure' });
 		scope.logger.debug?.(`Error building ${key}`);
 		throw error;

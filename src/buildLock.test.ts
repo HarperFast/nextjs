@@ -47,6 +47,9 @@ describe('withBuildLock', () => {
 	// A minimal Scope: `withBuildLock` only touches `appName`/`directory` (for logs) and the `logger`.
 	const scope = { appName: 'test-app', directory: '/test/dir', logger: {} } as unknown as Scope;
 
+	/** Yield to the microtask/macrotask queue so awaited puts settle (setImmediate is not mock-timed here). */
+	const tick = () => new Promise((resolve) => setImmediate(resolve));
+
 	/** Build deps whose `runBuild` records that it ran and resolves with a BUILD_ID. */
 	function makeDeps(events: string[], buildId = 'new-build', getBuildId: () => string | null = () => 'on-disk'): BuildLockDeps {
 		return {
@@ -96,10 +99,10 @@ describe('withBuildLock', () => {
 		assert.deepStrictEqual(table.puts, [], 'never writes a claim of its own — the sibling produced the output');
 	});
 
-	it('treats a stale "building" record as abandoned and builds anyway', async (t) => {
+	it('treats a "building" record with no recent heartbeat as abandoned and builds anyway', async (t) => {
 		const events: string[] = [];
-		// Older than the 5-minute stale threshold → the holder is assumed crashed.
-		const table = makeTable(events, [building(6 * 60 * 1000)]);
+		// No heartbeat for longer than the stale threshold → the holder is assumed crashed.
+		const table = makeTable(events, [building(5 * 60 * 1000)]);
 		useTable(t, table);
 
 		await withBuildLock(scope, makeDeps(events));
@@ -163,5 +166,39 @@ describe('withBuildLock', () => {
 		await assert.rejects(withBuildLock(scope, deps), /boom/);
 
 		assert.deepStrictEqual(events, ['put:building', 'build', 'put:failure'], 'claims, fails, then records the failure');
+	});
+
+	it('re-stamps the claim on a heartbeat while a long build runs, then records success', async (t) => {
+		// Mock only setInterval — the heartbeat's timer. This path never reaches the waiter's sleep().
+		t.mock.timers.enable({ apis: ['setInterval'] });
+		const events: string[] = [];
+		const table = makeTable(events); // get → undefined (no existing record)
+		useTable(t, table);
+
+		let finishBuild!: () => void;
+		const deps: BuildLockDeps = {
+			getBuildId: () => null,
+			runBuild: () => new Promise<string>((resolve) => (finishBuild = () => resolve('hb-id'))),
+		};
+
+		const done = withBuildLock(scope, deps);
+		await tick(); // claim the build, start the build, and arm the heartbeat
+		assert.deepStrictEqual(events, ['put:building'], 'claims once up front');
+
+		// Simulate a build long enough to cross two heartbeat intervals (30s each).
+		t.mock.timers.tick(30_000);
+		await tick();
+		t.mock.timers.tick(30_000);
+		await tick();
+		assert.deepStrictEqual(
+			events,
+			['put:building', 'put:building', 'put:building'],
+			'each heartbeat re-stamps the building claim so a live build never looks abandoned'
+		);
+
+		finishBuild();
+		await done;
+		assert.strictEqual(events.at(-1), 'put:success', 'the terminal record is the last write — no heartbeat re-stamp after it');
+		assert.strictEqual(table.puts.at(-1)?.value.buildId, 'hb-id');
 	});
 });
