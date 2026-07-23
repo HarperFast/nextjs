@@ -169,8 +169,8 @@ describe('withBuildLock', () => {
 	});
 
 	it('re-stamps the claim on a heartbeat while a long build runs, then records success', async (t) => {
-		// Mock only setInterval — the heartbeat's timer. This path never reaches the waiter's sleep().
-		t.mock.timers.enable({ apis: ['setInterval'] });
+		// Mock only setTimeout — the heartbeat's timer. This path never reaches the waiter's sleep().
+		t.mock.timers.enable({ apis: ['setTimeout'] });
 		const events: string[] = [];
 		const table = makeTable(events); // get → undefined (no existing record)
 		useTable(t, table);
