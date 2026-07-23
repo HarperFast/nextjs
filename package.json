@@ -1,6 +1,6 @@
 {
 	"name": "@harperfast/nextjs",
-	"version": "2.2.1",
+	"version": "2.2.3",
 	"type": "module",
 	"description": "A Harper plugin for running Next.js apps.",
 	"keywords": [
@@ -23,6 +23,9 @@
 		"url": "git+https://github.com/HarperFast/nextjs.git"
 	},
 	"license": "Apache-2.0",
+	"publishConfig": {
+		"access": "public"
+	},
 	"files": [
 		"dist/**",
 		"!dist/**/*.test.*",
@@ -40,7 +43,8 @@
 		"build": "tsc -p tsconfig.build.json",
 		"install:fixtures": "node scripts/install-fixtures.js",
 		"test": "npm run build && node --test \"dist/**/*.test.js\"",
-		"test:integration": "playwright test --config integrationTests/playwright.config.ts"
+		"test:integration": "playwright test --config integrationTests/playwright.config.ts",
+		"prepublishOnly": "npm run build"
 	},
 	"engines": {
 		"node": ">=20"
