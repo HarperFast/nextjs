@@ -1,4 +1,4 @@
-import type { Scope, Config, FilesOption } from 'harper';
+import { flushDatabases, type Scope, type Config, type FilesOption } from 'harper';
 
 import { createRequire } from 'node:module';
 import { parse as urlParse } from 'node:url';
@@ -278,6 +278,11 @@ async function build(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 
 /** Runs `next build` for the detected Next.js version and returns the resulting BUILD_ID. */
 async function runNextBuild(scope: Scope, config: NextPluginConfig, next: NextPackage): Promise<string> {
+	// Next.js generates static pages using child processes and only a single process can open the
+	// RocksDB databases, so force Harper to start in read-only mode
+	process.env.HARPER_READONLY = 'true';
+	await flushDatabases();
+
 	// --expose-internals is set in Harper's worker execArgv but is not allowed in NODE_OPTIONS.
 	// Next.js reads process.execArgv to forward flags to its own child workers via NODE_OPTIONS,
 	// which causes Node to reject the build worker. Strip it before building and restore after.

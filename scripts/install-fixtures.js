@@ -13,7 +13,7 @@ const fixtures = readdirSync(fixturesDir, { withFileTypes: true })
 
 for (const fixture of fixtures) {
 	console.log(`Installing ${fixture} dependencies...`);
-	spawnSync('npm', ['install'], {
+	spawnSync('npm', ['install', '--install-links'], {
 		cwd: join(fixturesDir, fixture),
 		stdio: 'inherit',
 	});

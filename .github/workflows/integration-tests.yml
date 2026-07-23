@@ -25,9 +25,9 @@ on:
         default: 'all'
         options:
           - 'all'
-          - '20'
           - '22'
           - '24'
+          - '26'
       harper_ref:
         description: 'HarperFast/harper ref to test against (branch, SHA, or tag). Empty = use pinned version.'
         required: false
@@ -58,7 +58,7 @@ jobs:
         run: |
           INPUT="${{ inputs.node-version }}"
           if [ "$INPUT" == "all" ] || [ -z "$INPUT" ]; then
-            echo "node-versions=[20, 22, 24]" >> $GITHUB_OUTPUT
+            echo "node-versions=[22, 24, 26]" >> $GITHUB_OUTPUT
           else
             echo "node-versions=[$INPUT]" >> $GITHUB_OUTPUT
           fi
