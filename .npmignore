@@ -1,0 +1,9 @@
+# Belt-and-suspenders backstop. The published file list is controlled primarily by the "files"
+# allowlist in package.json, which ships `dist/**` minus `dist/**/*.test.*` — so any new source module
+# is included automatically while compiled test code is excluded.
+#
+# This .npmignore is only a secondary guard: an `.npmignore` cannot subtract from a directory that the
+# "files" allowlist force-includes, so it has no effect while that allowlist is in place. It exists to
+# keep compiled test code out of the package if the allowlist is ever loosened or removed. The pattern
+# matches every test artifact — `.js`, `.d.ts`, `.js.map`, `.d.ts.map` — at any depth.
+*.test.*
