@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  merge_group:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Needed for semantic-release to create GitHub releases and publish to npm via OIDC
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  id-token: write
+
+concurrency:
+  group: Release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release
+    environment: Release
+    # Ensure releases run only when code reaches main via GitHub Merge Queue, or when manually dispatched
+    runs-on: ubuntu-latest
+    if: github.repository == 'HarperFast/nextjs' || github.repository == 'harperfast/nextjs'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+          registry-url: 'https://registry.npmjs.org'
+      - name: Install dependencies
+        run: npm ci
+      # Compile the plugin so a broken build fails the release before it publishes. `dist/` is gitignored
+      # and rebuilt on publish via the `prepublishOnly` script, so this also surfaces build errors early.
+      - name: Build
+        run: npm run build
+      - name: Semantic Release
+        if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/main') }}
+        uses: cycjimmy/semantic-release-action@b12c8f6015dc215fe37bc154d4ad456dd3833c90 # v6.0.0
+        with:
+          extra_plugins: |
+            @semantic-release/commit-analyzer
+            @semantic-release/release-notes-generator
+            @semantic-release/npm
+            @semantic-release/git
+            @semantic-release/github
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_CONFIG_PROVENANCE: true
