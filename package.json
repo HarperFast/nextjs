@@ -1,6 +1,6 @@
 {
 	"name": "@harperfast/nextjs",
-	"version": "2.2.3",
+	"version": "2.2.4",
 	"type": "module",
 	"description": "A Harper plugin for running Next.js apps.",
 	"keywords": [
