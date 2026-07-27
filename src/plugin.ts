@@ -290,13 +290,20 @@ async function runNextBuild(scope: Scope, config: NextPluginConfig, next: NextPa
 	// so child processes can see all committed data. Unset after the build so the server process
 	// itself is not permanently locked into read-only mode.
 	//
-	// The flush is best-effort: it isn't reachable on every Harper build (see the import comment).
-	// Read-only children still open the databases and replay the on-disk WAL, so skipping the flush
-	// only risks them missing very recent writes — worth a warning, not worth failing the build.
+	// The flush is best-effort in both directions: it isn't reachable on every Harper build (see the
+	// import comment), and it can fail on a transient storage error. Read-only children still open the
+	// databases and replay the on-disk WAL, so a missing flush only risks them not seeing the most
+	// recent writes — worth a warning, not worth failing the build. Nothing here may throw: this runs
+	// before the try/finally below, so an escaping error would leave HARPER_READONLY set on a thread
+	// that goes on serving requests.
 	const prevHarperReadonly = process.env.HARPER_READONLY;
 	process.env.HARPER_READONLY = 'true';
 	if (harper.flushDatabases) {
-		await harper.flushDatabases();
+		try {
+			await harper.flushDatabases();
+		} catch (error) {
+			scope.logger.warn?.('Failed to flush databases before build; static pages may not see the most recent writes: ', error);
+		}
 	} else {
 		scope.logger.warn?.(
 			'harper.flushDatabases is unavailable; skipping pre-build flush. Static pages may not see the most recent writes.'

@@ -19,10 +19,19 @@ async function listDogs() {
 	// The ignore comments are required: both bundlers otherwise try to resolve this specifier at build
 	// time and fail with "Cannot find module as expression is too dynamic". They tell the bundler to
 	// leave the import alone and let Node resolve the absolute path at runtime.
-	if (typeof globalThis.tables === 'undefined' && harperEntry) {
+	if (typeof globalThis.tables === 'undefined') {
+		if (!harperEntry) {
+			throw new Error(
+				'HARPER_FIXTURE_HARPER_ENTRY is not set, so this fixture cannot load Harper outside a Harper thread. ' +
+					'It is passed in by integrationTests/next-16-static-data.pw.ts.'
+			);
+		}
 		await import(/* webpackIgnore: true */ /* turbopackIgnore: true */ harperEntry);
 	}
 
+	// No fallback if `tables.Dog` is missing, deliberately. An empty list is a *meaningful* result here
+	// — it is what a read-only child renders when it can't see the parent's unflushed writes — so
+	// swallowing a failure to load Harper as `[]` would make this test pass for the wrong reason.
 	const dogs = [];
 	for await (const dog of globalThis.tables.Dog.search()) {
 		dogs.push({ id: dog.id, name: dog.name });
