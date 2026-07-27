@@ -51,7 +51,7 @@ jobs:
           extra_plugins: |
             @semantic-release/commit-analyzer
             @semantic-release/release-notes-generator
-            conventional-changelog-conventionalcommits
+            conventional-changelog-conventionalcommits@^9.3.1
             @semantic-release/npm
             @semantic-release/git
             @semantic-release/github
