@@ -1,0 +1,12 @@
+rest: true
+
+graphqlSchema:
+  files: schema.graphql
+
+# Seeds the Dog table. Declared before @harperfast/nextjs so the row is committed by the time the
+# plugin runs `next build` — the statically generated /dogs page reads it during prerender.
+jsResource:
+  files: seed.js
+
+'@harperfast/nextjs':
+  package: '@harperfast/nextjs'

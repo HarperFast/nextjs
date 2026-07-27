@@ -15,10 +15,27 @@ function getHarperBinPath(): string {
 	return join(dirname(require.resolve('harper')), 'bin', 'harper.js');
 }
 
+/**
+ * Absolute path to Harper's module entry, for fixtures whose app code needs to import Harper from a
+ * `next build` child process. Fixtures can't depend on `harper` themselves — the harness deep-copies
+ * the fixture directory and the package is ~577MB — so the resolved path is passed through the
+ * environment instead. See fixtures/next-16-static-data/app/dogs/page.js.
+ */
+export function harperModuleEntry(): string {
+	return require.resolve('harper');
+}
+
 // Next.js build can take a while — give it 2 minutes.
 const STARTUP_TIMEOUT_MS = 120_000;
 
-export function makeHarperFixture(fixtureName: string) {
+export interface FixtureOptions {
+	/** Extra environment variables for the Harper process (inherited by its workers and their children). */
+	env?: Record<string, string>;
+	/** Overrides merged over the default `applications` config, e.g. `{ moduleLoader: 'native' }`. */
+	applications?: Record<string, string>;
+}
+
+export function makeHarperFixture(fixtureName: string, { env, applications }: FixtureOptions = {}) {
 	return async ({}: {}, use: (harper: HarperContext) => Promise<void>) => {
 		const fixturePath = join(import.meta.dirname, '..', 'fixtures', fixtureName);
 		const ctx = createHarperContext(fixtureName);
@@ -28,6 +45,7 @@ export function makeHarperFixture(fixtureName: string) {
 			started = await setupHarperWithFixture(ctx, fixturePath, {
 				harperBinPath: getHarperBinPath(),
 				startupTimeoutMs: STARTUP_TIMEOUT_MS,
+				...(env && { env }),
 				config: {
 					logging: {
 						stdStreams: true,
@@ -36,7 +54,8 @@ export function makeHarperFixture(fixtureName: string) {
 						lockdown: 'none',
 						moduleLoader: 'none',
 						dependencyLoader: 'native',
-						allowedDirectory: 'any'
+						allowedDirectory: 'any',
+						...applications,
 					},
 				},
 			});
@@ -55,9 +74,9 @@ export function makeHarperFixture(fixtureName: string) {
 	};
 }
 
-export function fixture(fixtureName: string) {
+export function fixture(fixtureName: string, options?: FixtureOptions) {
 	const test = base.extend<{}, { harper: HarperContext }>({
-		harper: [makeHarperFixture(fixtureName), { scope: 'worker', timeout: 120_000 }],
+		harper: [makeHarperFixture(fixtureName, options), { scope: 'worker', timeout: 120_000 }],
 	});
 	return { test, expect };
 }

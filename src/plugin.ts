@@ -1,4 +1,14 @@
-import { flushDatabases, type Scope, type Config, type FilesOption } from 'harper';
+// Namespace import, not `import { flushDatabases }`. Harper loads components through a sandboxed VM
+// loader where `harper` is a SyntheticModule built from a hardcoded allowlist (getHarperExports in
+// harper's security/jsLoader.ts). `flushDatabases` is a documented package export but is not on that
+// allowlist, so a named import fails at *link* time with "does not provide an export named
+// 'flushDatabases'" — fatal, taking the whole plugin down. A namespace import always links; the
+// property is simply undefined where it isn't exposed, which runNextBuild handles.
+//
+// It *is* defined under `applications.moduleLoader: native`, which bypasses the VM loader and resolves
+// the real package. So this has to work both ways, not just on the default loader.
+import * as harper from 'harper';
+import type { Scope, Config, FilesOption } from 'harper';
 
 import { createRequire } from 'node:module';
 import { parse as urlParse } from 'node:url';
@@ -282,9 +292,29 @@ async function runNextBuild(scope: Scope, config: NextPluginConfig, next: NextPa
 	// RocksDB databases, so force child processes to start Harper in read-only mode. Flush first
 	// so child processes can see all committed data. Unset after the build so the server process
 	// itself is not permanently locked into read-only mode.
+	//
+	// The flush is best-effort in both directions: it isn't reachable on every Harper build (see the
+	// import comment), and it can fail on a transient storage error. Read-only children still open the
+	// databases and replay the on-disk WAL, so a missing flush only risks them not seeing the most
+	// recent writes — worth a warning, not worth failing the build. Nothing here may throw: this runs
+	// before the try/finally below, so an escaping error would leave HARPER_READONLY set on a thread
+	// that goes on serving requests.
 	const prevHarperReadonly = process.env.HARPER_READONLY;
 	process.env.HARPER_READONLY = 'true';
-	await flushDatabases();
+	if (harper.flushDatabases) {
+		try {
+			await harper.flushDatabases();
+		} catch (error) {
+			scope.logger.warn?.('Failed to flush databases before build; static pages may not see the most recent writes: ', error);
+		}
+	} else {
+		scope.logger.warn?.(
+			'harper.flushDatabases is unavailable, so the pre-build flush was skipped and statically generated pages ' +
+				'may not see recently written data. Harper only exposes it to components under the native module ' +
+				'loader; set `applications.moduleLoader: native` in harperdb-config.yaml to enable the flush, at the ' +
+				'cost of per-application tagged logging and config.'
+		);
+	}
 
 	// --expose-internals is set in Harper's worker execArgv but is not allowed in NODE_OPTIONS.
 	// Next.js reads process.execArgv to forward flags to its own child workers via NODE_OPTIONS,
