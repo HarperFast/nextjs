@@ -1,4 +1,11 @@
-import { flushDatabases, type Scope, type Config, type FilesOption } from 'harper';
+// Namespace import, not `import { flushDatabases }`. Harper loads components through a sandboxed VM
+// loader where `harper` is a SyntheticModule built from a hardcoded allowlist (getHarperExports in
+// harper's security/jsLoader.ts). `flushDatabases` is a documented package export but is not on that
+// allowlist, so a named import fails at *link* time with "does not provide an export named
+// 'flushDatabases'" — fatal, taking the whole plugin down. A namespace import always links; the
+// property is simply undefined where it isn't exposed, which runNextBuild handles.
+import * as harper from 'harper';
+import type { Scope, Config, FilesOption } from 'harper';
 
 import { createRequire } from 'node:module';
 import { parse as urlParse } from 'node:url';
@@ -282,9 +289,19 @@ async function runNextBuild(scope: Scope, config: NextPluginConfig, next: NextPa
 	// RocksDB databases, so force child processes to start Harper in read-only mode. Flush first
 	// so child processes can see all committed data. Unset after the build so the server process
 	// itself is not permanently locked into read-only mode.
+	//
+	// The flush is best-effort: it isn't reachable on every Harper build (see the import comment).
+	// Read-only children still open the databases and replay the on-disk WAL, so skipping the flush
+	// only risks them missing very recent writes — worth a warning, not worth failing the build.
 	const prevHarperReadonly = process.env.HARPER_READONLY;
 	process.env.HARPER_READONLY = 'true';
-	await flushDatabases();
+	if (harper.flushDatabases) {
+		await harper.flushDatabases();
+	} else {
+		scope.logger.warn?.(
+			'harper.flushDatabases is unavailable; skipping pre-build flush. Static pages may not see the most recent writes.'
+		);
+	}
 
 	// --expose-internals is set in Harper's worker execArgv but is not allowed in NODE_OPTIONS.
 	// Next.js reads process.execArgv to forward flags to its own child workers via NODE_OPTIONS,
