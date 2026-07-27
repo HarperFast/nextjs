@@ -61,7 +61,7 @@
 	},
 	"devDependencies": {
 		"@harperfast/integration-testing": "0.7.0",
-		"@playwright/test": "1.61.1",
+		"@playwright/test": "1.62.0",
 		"@types/node": "^26",
 		"harper": "5.1.23",
 		"next-14": "npm:next@14.2.35",
