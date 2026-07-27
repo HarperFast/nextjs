@@ -279,7 +279,10 @@ async function build(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 /** Runs `next build` for the detected Next.js version and returns the resulting BUILD_ID. */
 async function runNextBuild(scope: Scope, config: NextPluginConfig, next: NextPackage): Promise<string> {
 	// Next.js generates static pages using child processes and only a single process can open the
-	// RocksDB databases, so force Harper to start in read-only mode
+	// RocksDB databases, so force child processes to start Harper in read-only mode. Flush first
+	// so child processes can see all committed data. Unset after the build so the server process
+	// itself is not permanently locked into read-only mode.
+	const prevHarperReadonly = process.env.HARPER_READONLY;
 	process.env.HARPER_READONLY = 'true';
 	await flushDatabases();
 
@@ -332,6 +335,11 @@ async function runNextBuild(scope: Scope, config: NextPluginConfig, next: NextPa
 		const buildIdPath = join(scope.directory, '.next', 'BUILD_ID');
 		return readFileSync(buildIdPath, 'utf-8').trim();
 	} finally {
+		if (prevHarperReadonly === undefined) {
+			delete process.env.HARPER_READONLY;
+		} else {
+			process.env.HARPER_READONLY = prevHarperReadonly;
+		}
 		if (exposeInternalsIdx !== -1) process.execArgv.splice(exposeInternalsIdx, 0, '--expose-internals');
 	}
 }
