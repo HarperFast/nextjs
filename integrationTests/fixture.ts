@@ -28,7 +28,14 @@ export function harperModuleEntry(): string {
 // Next.js build can take a while — give it 2 minutes.
 const STARTUP_TIMEOUT_MS = 120_000;
 
-export function makeHarperFixture(fixtureName: string, env?: Record<string, string>) {
+export interface FixtureOptions {
+	/** Extra environment variables for the Harper process (inherited by its workers and their children). */
+	env?: Record<string, string>;
+	/** Overrides merged over the default `applications` config, e.g. `{ moduleLoader: 'native' }`. */
+	applications?: Record<string, string>;
+}
+
+export function makeHarperFixture(fixtureName: string, { env, applications }: FixtureOptions = {}) {
 	return async ({}: {}, use: (harper: HarperContext) => Promise<void>) => {
 		const fixturePath = join(import.meta.dirname, '..', 'fixtures', fixtureName);
 		const ctx = createHarperContext(fixtureName);
@@ -47,7 +54,8 @@ export function makeHarperFixture(fixtureName: string, env?: Record<string, stri
 						lockdown: 'none',
 						moduleLoader: 'none',
 						dependencyLoader: 'native',
-						allowedDirectory: 'any'
+						allowedDirectory: 'any',
+						...applications,
 					},
 				},
 			});
@@ -66,9 +74,9 @@ export function makeHarperFixture(fixtureName: string, env?: Record<string, stri
 	};
 }
 
-export function fixture(fixtureName: string, env?: Record<string, string>) {
+export function fixture(fixtureName: string, options?: FixtureOptions) {
 	const test = base.extend<{}, { harper: HarperContext }>({
-		harper: [makeHarperFixture(fixtureName, env), { scope: 'worker', timeout: 120_000 }],
+		harper: [makeHarperFixture(fixtureName, options), { scope: 'worker', timeout: 120_000 }],
 	});
 	return { test, expect };
 }

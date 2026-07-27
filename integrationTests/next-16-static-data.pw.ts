@@ -8,7 +8,7 @@ import { fixture, harperModuleEntry } from './fixture.ts';
 // fixture either never touches Harper data or marks its data pages `force-dynamic`, so nothing else
 // in this suite covers the build-time path.
 const { test, expect } = fixture('next-16-static-data', {
-	HARPER_FIXTURE_HARPER_ENTRY: harperModuleEntry(),
+	env: { HARPER_FIXTURE_HARPER_ENTRY: harperModuleEntry() },
 });
 
 test('home page renders', async ({ page, harper }) => {
@@ -25,15 +25,14 @@ test('statically generated page builds while Harper holds the databases open', a
 	await expect(page.getByTestId('dogs')).toBeAttached();
 });
 
-// Known gap, not a flake: the read-only child reads the on-disk state, so rows the parent has
-// committed but not yet flushed are invisible to it — this page prerenders an empty list even though
-// `GET /Dog/rex` returns Rex. `runNextBuild` calls `flushDatabases()` to close exactly this hole, but
-// Harper does not expose that export to components (its component `harper` module is a fixed
-// allowlist in security/jsLoader.ts), so the call is currently a no-op and the plugin logs a warning.
-// Un-skip once Harper exposes `flushDatabases`; that is the assertion proving the flush works.
-test.fixme('statically generated page sees data committed before the build', async ({ page, harper }) => {
+// Documents the flush gap under the default (VM) loader, rather than skipping it. Harper's component
+// `harper` module is a fixed allowlist (security/jsLoader.ts) that omits `flushDatabases`, so the
+// pre-build flush is a no-op here: the read-only child reads on-disk state and prerenders an empty
+// list even though `GET /Dog/rex` returns Rex. next-16-static-data-native.pw.ts runs the same fixture
+// with `moduleLoader: native`, where the flush does run and the row *is* visible.
+test('without a reachable flush, the build child does not see unflushed writes', async ({ page, harper }) => {
 	await page.goto(`${harper.httpURL}/dogs`);
-	await expect(page.getByTestId('dog-rex')).toHaveText('Rex');
+	await expect(page.getByTestId('dogs')).toBeEmpty();
 });
 
 // The build must not leave the serving process read-only, or writes after the build fail.

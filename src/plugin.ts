@@ -4,6 +4,9 @@
 // allowlist, so a named import fails at *link* time with "does not provide an export named
 // 'flushDatabases'" — fatal, taking the whole plugin down. A namespace import always links; the
 // property is simply undefined where it isn't exposed, which runNextBuild handles.
+//
+// It *is* defined under `applications.moduleLoader: native`, which bypasses the VM loader and resolves
+// the real package. So this has to work both ways, not just on the default loader.
 import * as harper from 'harper';
 import type { Scope, Config, FilesOption } from 'harper';
 
@@ -306,7 +309,10 @@ async function runNextBuild(scope: Scope, config: NextPluginConfig, next: NextPa
 		}
 	} else {
 		scope.logger.warn?.(
-			'harper.flushDatabases is unavailable; skipping pre-build flush. Static pages may not see the most recent writes.'
+			'harper.flushDatabases is unavailable, so the pre-build flush was skipped and statically generated pages ' +
+				'may not see recently written data. Harper only exposes it to components under the native module ' +
+				'loader; set `applications.moduleLoader: native` in harperdb-config.yaml to enable the flush, at the ' +
+				'cost of per-application tagged logging and config.'
 		);
 	}
 
