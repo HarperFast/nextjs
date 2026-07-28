@@ -7,6 +7,9 @@ A [Harper Plugin](https://docs.harperdb.io/docs/reference/components/plugins) fo
 > [!NOTE]
 > This package currently supports **Next.js v14, v15, and v16** only.
 
+> [!IMPORTANT]
+> Requires **Harper v5** to run. **Static generation that reads Harper data at build time requires Harper v5.1 or newer** — it depends on the `HARPER_READONLY` build mode and `flushDatabases`, which do not exist in Harper v5.0.x. On Harper v5.0.x the build ignores read-only mode and fails when the build process cannot acquire the RocksDB lock held by the running instance.
+
 ## Usage
 
 > [!NOTE]
