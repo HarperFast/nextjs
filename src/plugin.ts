@@ -396,11 +396,17 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 
 	scope.server?.http?.(
 		(request, next) => {
-			if (request._nodeResponse === undefined) return next(request);
-			// Go through the adapter rather than handing Next.js `request._nodeRequest` directly: Harper's
-			// router strips an application's urlPath mount by proxying the Harper `Request`, so the Node
-			// request underneath it still carries the un-stripped URL. The adapter presents the Request's
-			// own method/url/headers over that Node request.
+			// `== null`, not `=== undefined`: Harper's Bun and uWS requests carry a null `_nodeResponse`,
+			// and neither implements the Node adapter used below.
+			if (request._nodeResponse == null) return next(request);
+			// Harper's router strips an application's urlPath mount by proxying the Harper `Request`, so the
+			// Node request underneath it still carries the un-stripped URL. Only a request some middleware
+			// rewrote needs the adapter, which presents the Request's own method/url/headers over that Node
+			// request; anything else keeps the direct hand-off.
+			if (request.url === request._nodeRequest.url) {
+				// @ts-expect-error - Not sure when the IncomingMessage.url could be undefined ; need to dig into it.
+				return requestHandler(request._nodeRequest, request._nodeResponse, urlParse(request._nodeRequest.url, true));
+			}
 			return request
 				.withNodeAdapter((nodeRequest, nodeResponse) =>
 					// @ts-expect-error - Not sure when the IncomingMessage.url could be undefined ; need to dig into it.
@@ -410,7 +416,7 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 					// Required by withNodeAdapter: a connection reset after the headers are sent destroys this
 					// stream with an error, which Node throws as an uncaught exception without a listener.
 					response.body.on('error', (error) =>
-						scope.logger.debug?.(`Next.js response stream error for ${request.url}: `, error)
+						scope.logger.debug?.(`Next.js response stream error for ${request.pathname}: `, error)
 					);
 					return response;
 				});
