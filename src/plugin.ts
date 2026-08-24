@@ -397,11 +397,10 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 	scope.server?.http?.(
 		(request, next) => {
 			if (request._nodeResponse === undefined) return next(request);
-			// Go through the adapter rather than handing Next.js `request._nodeRequest` directly: when the
-			// application is mounted at a urlPath, Harper's router strips that prefix by proxying the Harper
-			// `Request`, leaving the Node request underneath it holding the un-stripped URL. The adapter
-			// presents the Request's own method/url/headers over that Node request, so Next.js routes
-			// against the mount-relative path.
+			// Go through the adapter rather than handing Next.js `request._nodeRequest` directly: Harper's
+			// router strips an application's urlPath mount by proxying the Harper `Request`, so the Node
+			// request underneath it still carries the un-stripped URL. The adapter presents the Request's
+			// own method/url/headers over that Node request.
 			return request
 				.withNodeAdapter((nodeRequest, nodeResponse) =>
 					// @ts-expect-error - Not sure when the IncomingMessage.url could be undefined ; need to dig into it.
