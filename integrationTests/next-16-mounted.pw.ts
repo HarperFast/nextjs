@@ -39,7 +39,7 @@ test.describe.fixme('served under a urlPath mount', () => {
 	});
 });
 
-// Outside the mount there is nothing to adapt, so this holds on any Harper.
+// Outside the fixme block: nothing rewrites this URL, so it never reaches the adapter.
 test('paths outside the mount are not served by Next.js', async ({ request, harper }) => {
 	const response = await request.get(`${harper.httpURL}/about`);
 	expect(response.status()).toBe(404);

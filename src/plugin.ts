@@ -426,9 +426,9 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 				if (!warnedMissingNodeAdapter) {
 					warnedMissingNodeAdapter = true;
 					scope.logger.warn?.(
-						`This version of Harper does not provide Request.withNodeAdapter, so Next.js receives ${request._nodeRequest.url} ` +
-							`rather than the ${request.url} Harper resolved it to. An application mounted at a urlPath will not route correctly; ` +
-							'upgrade Harper or serve the application at the root.'
+						'This version of Harper does not provide Request.withNodeAdapter, so Next.js receives the URL as it ' +
+							`arrived rather than the ${request.pathname} Harper resolved it to. An application mounted at a ` +
+							'urlPath will not route correctly; upgrade Harper or serve the application at the root.'
 					);
 				}
 			}
