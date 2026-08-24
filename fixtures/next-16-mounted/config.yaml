@@ -1,0 +1,5 @@
+# Mounts the Next.js app under a urlPath. Harper's router strips the mount before the
+# plugin's handler runs, so Next.js must be handed the stripped URL, not the raw Node one.
+'@harperfast/nextjs':
+  package: '@harperfast/nextjs'
+  urlPath: /mounted
