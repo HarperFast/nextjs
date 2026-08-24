@@ -396,10 +396,25 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 
 	scope.server?.http?.(
 		(request, next) => {
-			return request._nodeResponse === undefined
-				? next(request)
-				: // @ts-expect-error - Not sure when the IncomingMessage.url could be undefined ; need to dig into it.
-					requestHandler(request._nodeRequest, request._nodeResponse, urlParse(request._nodeRequest.url, true));
+			if (request._nodeResponse === undefined) return next(request);
+			// Go through the adapter rather than handing Next.js `request._nodeRequest` directly: when the
+			// application is mounted at a urlPath, Harper's router strips that prefix by proxying the Harper
+			// `Request`, leaving the Node request underneath it holding the un-stripped URL. The adapter
+			// presents the Request's own method/url/headers over that Node request, so Next.js routes
+			// against the mount-relative path.
+			return request
+				.withNodeAdapter((nodeRequest, nodeResponse) =>
+					// @ts-expect-error - Not sure when the IncomingMessage.url could be undefined ; need to dig into it.
+					requestHandler(nodeRequest, nodeResponse, urlParse(nodeRequest.url, true))
+				)
+				.then((response) => {
+					// Required by withNodeAdapter: a connection reset after the headers are sent destroys this
+					// stream with an error, which Node throws as an uncaught exception without a listener.
+					response.body.on('error', (error) =>
+						scope.logger.debug?.(`Next.js response stream error for ${request.url}: `, error)
+					);
+					return response;
+				});
 		},
 		{ runFirst: config.runFirst, port: config.port, securePort: config.securePort }
 	);
