@@ -22,5 +22,7 @@ Review the `README.md` and `CONTRIBUTING.md` for all relevant repository informa
 - Run `npm run test:integration` to run all tests, or `npm run test:integration -- integrationTests/next-15.pw.ts` for a single file.
 - Test startup is slow by design — each test file starts a real Harper instance and waits for Next.js to build (up to 2 minutes). A slow start is not a failure.
 - The ISR cache tests in `integrationTests/next-16.pw.ts` are intentionally skipped; `CacheHandler.cts` is a work in progress.
+- Integration tests need the macOS loopback alias pool (127.0.0.2+). Without it every fixture fails at startup with `LoopbackAddressValidationError` / `EADDRNOTAVAIL` before any assertion runs — that is a machine-setup gap, not a test failure. `ifconfig lo0 | grep 'inet '` shows what is configured.
+- There is no `format:fix` script in `package.json` despite the Code Style note below; match the surrounding file style (tabs, semicolons).
 - `next-16-static-data` is run by two test files: `next-16-static-data.pw.ts` on the default VM module loader (where Harper's component `harper` allowlist omits `flushDatabases`, so the plugin's pre-build flush is a no-op and a read-only build child can't see unflushed writes) and `next-16-static-data-native.pw.ts` under `applications.moduleLoader: native`, where the flush does run. The pair is what pins that behavior down — keep both.
 - CI is currently disabled (`if: false` in `.github/workflows/integration-tests.yml`). Run tests locally.

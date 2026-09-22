@@ -14,12 +14,7 @@ import type {
 
 import type { databases as DatabasesType } from 'harper';
 
-import {
-	cacheInvalidations,
-	initializeInvalidationSubscription,
-	isInvalidated,
-	recordInvalidation,
-} from './cacheInvalidation.cjs';
+import { initializeInvalidationSubscription, isInvalidated, recordInvalidation } from './cacheInvalidation.cjs';
 
 const NEXT_CACHE_TAGS_HEADER = 'x-next-cache-tags';
 

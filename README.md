@@ -177,6 +177,16 @@ Glob pattern specifying which files Harper should watch for changes. Example: `'
 
 `@harperfast/nextjs` includes a Harper-backed cache handler for Next.js [Incremental Static Regeneration (ISR)](https://nextjs.org/docs/app/guides/incremental-static-regeneration), the [Data Cache (`fetch()`)](https://nextjs.org/docs/app/deep-dive/caching#data-cache), and [`unstable_cache`](https://nextjs.org/docs/app/api-reference/functions/unstable_cache). Cached entries live in Harper instead of the worker's local filesystem, so a cache write on one node is visible to every node in the cluster.
 
+> [!IMPORTANT]
+> Next.js has **two** cache-handler interfaces and they are configured separately.
+>
+> | Next.js config | Interface | Backs |
+> | --- | --- | --- |
+> | `cacheHandler` | `CacheHandler` (incremental cache) | ISR, the Data Cache, `unstable_cache` |
+> | `cacheHandlers` | `CacheHandler` (`use cache`) | the [`'use cache'`](https://nextjs.org/docs/app/api-reference/directives/use-cache) directive |
+>
+> Setting only `cacheHandler` leaves `'use cache'` entries in Next.js's built-in in-memory handler — per-worker, lost on restart, and invisible to the rest of the cluster. Apps using `cacheComponents` / `'use cache'` need [`useCache`](#use-cache) as well.
+
 ### Enabling
 
 Set the `cacheHandler` path using the `cacheHandlerPath()` helper. This helper resolves the cache handler relative to your config file, which is required by Turbopack:
@@ -245,24 +255,61 @@ export async function POST(request) {
 
 `fetch()` calls with `next: { tags: [...] }` and the `'use cache'` directive (with `cacheTag()`) are also supported — anywhere Next.js attaches tags to a cached value, the handler will pick them up.
 
+### `useCache`
+
+Route `'use cache'` entries to Harper by registering `cacheHandlers`:
+
+```js
+// next.config.mjs
+import { withHarper, cacheHandlerPath } from '@harperfast/nextjs';
+
+export default withHarper(
+	{
+		cacheComponents: true,
+		cacheHandler: cacheHandlerPath(import.meta.dirname),
+	},
+	{ useCache: true, configDir: import.meta.dirname }
+);
+```
+
+Requires Next.js 16, which is where the interface exists. Opt-in for now — it becomes the default in the next major, because turning it on changes where existing apps' `'use cache'` entries are stored.
+
+### Per-entry cache lives
+
+The handler persists the `revalidate` and `expire` Next.js supplies for each entry.
+
+This matters more than it sounds. Next.js keeps cache lives in `SharedCacheControls` — a per-process `Map` plus the build-time prerender manifest — and neither replicates. Without persisting them, an entry reaches another node but its cache lives do not, and that node falls back to Next.js's 1-second default, so the entry looks stale on almost every read. Persisting them is what makes cache lives coherent across the cluster.
+
 ### How invalidation works
 
-The cache handler uses a **soft-invalidation** model:
+The cache handler uses a **soft-invalidation** model, followed by a background sweep:
 
 1. `revalidateTag(tag)` writes a `{ tag, timestamp }` row to the `nextjs_cache_invalidation` table and updates an in-memory map in the calling worker.
 2. Every other Harper worker subscribes to that table and updates its own map when the row is replicated — typically within milliseconds.
-3. On the next `cache.get()`, if any of the cached entry's tags has an invalidation timestamp newer than the entry's `lastModified`, the handler returns `null` and Next.js regenerates the entry. The new write replaces the row with a fresh `lastModified`, naturally restoring "fresh" status.
+3. A throttled background pass then invalidates the matching cache entries and drops the tombstone. Entries are **invalidated, not deleted**, so Next.js can still serve them stale while regenerating — an invalidation storm should not turn into a render storm.
+4. On the next `cache.get()`, an invalidated entry is reported to Next.js as *stale* rather than missing wherever Next.js supports that, so it serves the cached response and regenerates in the background.
 
-There is no background sweep that hard-deletes invalidated rows; stale rows are overwritten by Next.js the next time the entry is regenerated. The `nextjs_cache_invalidation` rows themselves expire after 7 days so abandoned tags don't accumulate.
+Because the sweep does the real work, the 7-day expiry on `nextjs_cache_invalidation` is a safety margin for sweep failure rather than a correctness parameter — the tombstone only has to outlive the sweep, not the entries it covers. While it remains, soft invalidation keeps reads correct, so a failed sweep degrades rather than loses the invalidation.
+
+Two deliberate limits:
+
+- **Next.js's implicit route tags (`_N_T_…`) are never swept.** A tag like `_N_T_/layout` is carried by every page in the app, so sweeping one would scan and rewrite the entire cache. Those are left to expire.
+- **`tags` is not indexed.** Harper cannot index array elements, and the `contains` comparator cannot use an index regardless, so a sweep scans. That is why sweeps are chunked with bounded concurrency, and why broad tags are excluded rather than throttled.
+
+Harper pushes invalidations to every worker via table replication, so the `refreshTags()` call the `'use cache'` interface expects to poll a tags service is a no-op here — the map it would refresh is already current.
 
 ### Schema
 
-Enabling the cache handler adds two tables to the `harperfast_nextjs` database:
+Enabling the cache handler adds these tables to the `harperfast_nextjs` database:
 
 | Table | Purpose |
 | --- | --- |
-| `nextjs_isr_cache` | One row per cached entry. Stores `data` (the Next.js `IncrementalCacheValue`), `tags` (the tags attached to the entry), and `lastModified`. |
+| `nextjs_isr_cache` | One row per cached ISR/Data Cache entry. Stores `data` (the Next.js `IncrementalCacheValue`), `tags`, the entry's `revalidate`/`expire`, and `lastModified`. |
+| `nextjs_use_cache` | One row per `'use cache'` entry. Stores `value` (the rendered bytes as a `Blob`), `tags`, `timestamp`, and the entry's `stale`/`revalidate`/`expire`. |
 | `nextjs_cache_invalidation` | One row per invalidated tag. `id` is the tag itself; `timestamp` is when `revalidateTag` was called. Auto-expires after 7 days. |
+
+> [!NOTE]
+> A table's `expiration` is fixed when the table is created — changing it in `schema.graphql` does not migrate an existing table. Verify with `describe_table` after upgrading; an instance created before a change will still report the old value.
 
 ## Contributing
 
