@@ -166,6 +166,9 @@ function mirrorToNextTagsManifest(tags: string[], timestamp: number, deps: Inval
 			tagsManifest.set(tag, entry);
 		}
 	} catch (error) {
+		// Next 14 has no tags-manifest.external.js. Without this the legacy handler logs an error on
+		// EVERY invalidation there, which is noise rather than a fault.
+		if ((error as { code?: string } | undefined)?.code === 'MODULE_NOT_FOUND') return;
 		getLogger(deps).error('[CacheHandler] could not mirror invalidation into the Next tags manifest', error);
 	}
 }
@@ -344,7 +347,10 @@ export async function recordInvalidation(
 	durations: { expire?: number } | undefined,
 	deps: InvalidationDeps = {}
 ): Promise<void> {
-	if (tags.length === 0) return;
+	// Deduplicate before anything else: duplicates cost a redundant put each, and — more expensively —
+	// schedule a duplicate sweep, which scans because tags cannot be indexed.
+	const uniqueTags = Array.from(new Set(tags));
+	if (uniqueTags.length === 0) return;
 
 	const databases = getDatabases(deps);
 	if (!databases) return;
@@ -358,13 +364,13 @@ export async function recordInvalidation(
 	// than immediately.
 	const timestamp = Date.now() + (durations?.expire !== undefined ? durations.expire * 1000 : 0);
 
-	noteInvalidation(tags, timestamp, deps);
+	noteInvalidation(uniqueTags, timestamp, deps);
 
-	await Promise.all(tags.map((tag) => invalidationTable.put(tag, { timestamp })));
+	await Promise.all(uniqueTags.map((tag) => invalidationTable.put(tag, { timestamp })));
 
 	if (await isOverAdmissionThreshold(invalidationTable, deps)) {
 		getLogger(deps).error(
-			`[CacheHandler] ${MAX_PENDING_INVALIDATIONS}+ pending invalidations; shedding sweep for ${tags.length} tag(s)`
+			`[CacheHandler] ${MAX_PENDING_INVALIDATIONS}+ pending invalidations; shedding sweep for ${uniqueTags.length} tag(s)`
 		);
 		return;
 	}
@@ -373,7 +379,7 @@ export async function recordInvalidation(
 	if (!SWEEP_ENABLED && !deps.scheduleSweep) return;
 
 	const schedule = deps.scheduleSweep ?? ((task: () => Promise<void>) => void task());
-	for (const tag of tags) {
+	for (const tag of uniqueTags) {
 		if (!isSweepableTag(tag)) continue;
 		schedule(() => sweepTag(tag, timestamp, deps));
 	}

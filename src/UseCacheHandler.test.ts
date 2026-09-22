@@ -197,7 +197,10 @@ describe('UseCacheHandler cache lives', () => {
 		// Next supplies `performance.timeOrigin + performance.now()`, which is fractional. Uncoerced,
 		// Harper refuses the write and — because the failure is caught — the cache silently stores
 		// nothing while appearing to work.
-		await handler.set('fractional', Promise.resolve(entry({ timestamp: 1790101098624.713 })));
+		// Offset from now, not a pinned epoch value: a hardcoded timestamp goes stale as wall-clock
+		// advances past the default 3600s `expire`, so the test would pass when written and fail an
+		// hour later. The .713 is what makes it fractional, which is the thing under test.
+		await handler.set('fractional', Promise.resolve(entry({ timestamp: Date.now() + 0.713 })));
 
 		const result = await handler.get('fractional', []);
 

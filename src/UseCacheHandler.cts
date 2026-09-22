@@ -82,7 +82,15 @@ async function toBuffer(value: unknown): Promise<Buffer | undefined> {
 	if (Buffer.isBuffer(value)) return value;
 	if (value instanceof Uint8Array) return Buffer.from(value);
 	const blob = value as { arrayBuffer?: () => Promise<ArrayBuffer> };
-	if (typeof blob.arrayBuffer === 'function') return Buffer.from(await blob.arrayBuffer());
+	if (typeof blob.arrayBuffer === 'function') {
+		// A rejecting arrayBuffer() (corrupt row, read error) must degrade to a cache MISS. `get` has no
+		// surrounding try, so an unhandled rejection here would surface as a request error instead.
+		try {
+			return Buffer.from(await blob.arrayBuffer());
+		} catch {
+			return undefined;
+		}
+	}
 	return undefined;
 }
 
@@ -155,7 +163,9 @@ class HarperUseCacheHandler implements CacheHandler {
 			// Backdate past the revalidate window so Next regenerates, while staying inside expire so the
 			// entry is still served meanwhile. A miss here would cost a full render, which is exactly what
 			// an invalidation storm must not produce.
-			const staleAt = now - revalidate * 1000 - 1;
+			// Math.min: an entry already older than the revalidate window must not be forward-dated to
+			// staleAt, which would extend how long Next keeps serving it stale.
+			const staleAt = Math.min(timestamp, now - revalidate * 1000 - 1);
 			if (expire > 0 && staleAt + expire * 1000 <= now) return undefined;
 			effectiveTimestamp = staleAt;
 		}
