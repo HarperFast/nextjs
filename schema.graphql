@@ -23,6 +23,11 @@ type NextISRCache @table(database: "harperfast_nextjs", table: "nextjs_isr_cache
 	tags: [String]
 	revalidate: Int
 	expire: Int
+	# Set by the background sweep instead of Harper's `invalidate()`, which on a table with no
+	# `sourcedFrom` leaves the record awaiting a refresh that never arrives and blocks every later read.
+	# Recording staleness explicitly keeps the entry servable, which is the point — a miss costs a full
+	# render.
+	invalidatedAt: Long
 	lastModified: Long @updatedTime @indexed
 }
 
@@ -37,6 +42,7 @@ type NextUseCache @table(database: "harperfast_nextjs", table: "nextjs_use_cache
 	stale: Int
 	revalidate: Int
 	expire: Int
+	invalidatedAt: Long
 }
 
 type NextCacheInvalidation @table(database: "harperfast_nextjs", table: "nextjs_cache_invalidation", expiration: 604800) {

@@ -14,6 +14,7 @@ interface StoredEntry {
 	stale?: number;
 	revalidate?: number;
 	expire?: number;
+	invalidatedAt?: number;
 }
 
 interface UseCacheTable {
@@ -32,14 +33,31 @@ function getDatabases(): typeof DatabasesType | undefined {
 	return (globalThis as { databases?: typeof DatabasesType }).databases;
 }
 
+let missingTableReported = false;
+
+/**
+ * The table, or undefined when the Harper globals are not reachable from this module's context. A
+ * silent undefined here turns every write into a no-op that looks like a working cache, so the first
+ * occurrence is logged.
+ */
 function getTable(): UseCacheTable | undefined {
 	const databases = getDatabases();
-	if (!databases) return undefined;
-	return (databases as unknown as Record<string, Record<string, UseCacheTable>>)[DATABASE]?.[TABLE];
+	const table = databases
+		? (databases as unknown as Record<string, Record<string, UseCacheTable>>)[DATABASE]?.[TABLE]
+		: undefined;
+
+	if (!table && !missingTableReported) {
+		missingTableReported = true;
+		getLogger().error(
+			`[UseCacheHandler] ${DATABASE}.${TABLE} is unreachable (databases global ${databases ? 'present' : 'missing'}); "use cache" entries are not being persisted`
+		);
+	}
+
+	return table;
 }
 
-function getLogger() {
-	return (globalThis as { logger?: { error(...args: unknown[]): void } }).logger ?? console;
+function getLogger(): { error(...args: unknown[]): void; info?(...args: unknown[]): void } {
+	return (globalThis as { logger?: { error(...args: unknown[]): void; info?(...args: unknown[]): void } }).logger ?? console;
 }
 
 /** Drain the entry's stream. Returns undefined if it errors, so a partial render is never cached. */
@@ -66,6 +84,16 @@ async function toBuffer(value: unknown): Promise<Buffer | undefined> {
 	const blob = value as { arrayBuffer?: () => Promise<ArrayBuffer> };
 	if (typeof blob.arrayBuffer === 'function') return Buffer.from(await blob.arrayBuffer());
 	return undefined;
+}
+
+/**
+ * Next derives entry timestamps from `performance.timeOrigin + performance.now()`, which is
+ * fractional, and cache lives can arrive fractional too. Harper rejects a non-integer for a Long/Int
+ * column, so an uncoerced write is refused outright — and, being caught, looks like a working cache
+ * that simply never stored anything.
+ */
+function toInteger(value: number | undefined): number | undefined {
+	return typeof value === 'number' && Number.isFinite(value) ? Math.floor(value) : undefined;
 }
 
 function toStoredValue(bytes: Buffer): unknown {
@@ -118,8 +146,9 @@ class HarperUseCacheHandler implements CacheHandler {
 		if (expire > 0 && timestamp + expire * 1000 < now) return undefined;
 
 		// Hard tags live on the record; soft tags are handled by getExpiration, which reports the
-		// invalidation timestamp for Next to compare itself.
-		const invalidatedAt = newestInvalidation(record.tags ?? []);
+		// invalidation timestamp for Next to compare itself. `invalidatedAt` is the sweep's own marker,
+		// which outlives the tombstone it was derived from.
+		const invalidatedAt = Math.max(newestInvalidation(record.tags ?? []), record.invalidatedAt ?? 0);
 
 		let effectiveTimestamp = timestamp;
 		if (invalidatedAt > timestamp) {
@@ -154,10 +183,10 @@ class HarperUseCacheHandler implements CacheHandler {
 			await table.put(cacheKey, {
 				value: toStoredValue(bytes),
 				tags: entry.tags ?? [],
-				timestamp: entry.timestamp ?? Date.now(),
-				stale: entry.stale,
-				revalidate: entry.revalidate,
-				expire: entry.expire,
+				timestamp: toInteger(entry.timestamp) ?? Date.now(),
+				stale: toInteger(entry.stale),
+				revalidate: toInteger(entry.revalidate),
+				expire: toInteger(entry.expire),
 			});
 
 			return bytes;

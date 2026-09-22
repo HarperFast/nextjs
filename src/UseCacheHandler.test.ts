@@ -66,6 +66,22 @@ function entry(overrides: Partial<UseCacheEntry> = {}): UseCacheEntry {
 	};
 }
 
+/**
+ * Harper rejects a non-integer for a Long/Int column. Next derives entry timestamps from
+ * `performance.timeOrigin + performance.now()`, which is fractional, so a mock that accepts anything
+ * hides a write that real Harper refuses outright.
+ */
+const INTEGER_COLUMNS = ['timestamp', 'stale', 'revalidate', 'expire'];
+
+function enforceSchema(value: Record<string, unknown>) {
+	for (const column of INTEGER_COLUMNS) {
+		const columnValue = value[column];
+		if (columnValue !== undefined && columnValue !== null && !Number.isInteger(columnValue)) {
+			throw new Error(`Value ${String(columnValue)} in property ${column} must be an integer`);
+		}
+	}
+}
+
 function installDatabases() {
 	const rows = new Map<string, Record<string, unknown>>();
 	(globalThis as Record<string, unknown>).databases = {
@@ -75,6 +91,7 @@ function installDatabases() {
 					return rows.get(key);
 				},
 				async put(key: string, value: Record<string, unknown>) {
+					enforceSchema(value);
 					rows.set(key, { id: key, ...value });
 				},
 				search() {
@@ -174,6 +191,32 @@ describe('UseCacheHandler cache lives', () => {
 		);
 
 		assert.equal(await handler.get('expired', []), undefined);
+	});
+
+	it('stores a fractional timestamp as an integer', async () => {
+		// Next supplies `performance.timeOrigin + performance.now()`, which is fractional. Uncoerced,
+		// Harper refuses the write and — because the failure is caught — the cache silently stores
+		// nothing while appearing to work.
+		await handler.set('fractional', Promise.resolve(entry({ timestamp: 1790101098624.713 })));
+
+		const result = await handler.get('fractional', []);
+
+		assert.ok(result, 'the write must not be rejected by the integer column');
+		assert.ok(Number.isInteger(result.timestamp));
+	});
+
+	it('stores fractional cache lives as integers', async () => {
+		await handler.set(
+			'fractional-lives',
+			Promise.resolve(entry({ stale: 30.5, revalidate: 120.9, expire: 900.1 }))
+		);
+
+		const result = await handler.get('fractional-lives', []);
+
+		assert.ok(result);
+		assert.ok(Number.isInteger(result.stale));
+		assert.ok(Number.isInteger(result.revalidate));
+		assert.ok(Number.isInteger(result.expire));
 	});
 
 	it('preserves the entry cache lives across the round trip', async () => {

@@ -108,7 +108,9 @@ export default class HarperCacheHandler implements CacheHandler {
 				? [...ctx.tags, ...('softTags' in ctx && Array.isArray(ctx.softTags) ? ctx.softTags : [])]
 				: [];
 
-		if (isInvalidated(recordTags, record.lastModified ?? 0, this.revalidatedTags, ctxTags)) {
+		const markedInvalidAt = (record as { invalidatedAt?: number }).invalidatedAt;
+
+		if (isInvalidated(recordTags, record.lastModified ?? 0, this.revalidatedTags, ctxTags, markedInvalidAt)) {
 			// An on-demand revalidation for this request is an explicit demand for fresh content.
 			if (recordTags.some((tag) => this.revalidatedTags.includes(tag))) return null;
 
@@ -137,9 +139,11 @@ export default class HarperCacheHandler implements CacheHandler {
 		// Next keeps cache lives in a per-process Map plus the build-time prerender manifest, neither of
 		// which replicates. Persisting them alongside the entry is what lets another node compute the
 		// same staleness instead of falling back to `calculateRevalidate`'s 1-second default.
+		// Floored because Harper rejects a non-integer for an Int column, and a rejected write here is
+		// silent — the entry simply never lands.
 		const cacheControl = 'cacheControl' in ctx ? ctx.cacheControl : undefined;
-		const revalidate = typeof cacheControl?.revalidate === 'number' ? cacheControl.revalidate : undefined;
-		const expire = typeof cacheControl?.expire === 'number' ? cacheControl.expire : undefined;
+		const revalidate = typeof cacheControl?.revalidate === 'number' ? Math.floor(cacheControl.revalidate) : undefined;
+		const expire = typeof cacheControl?.expire === 'number' ? Math.floor(cacheControl.expire) : undefined;
 
 		await table.put(key, { data, tags, revalidate, expire });
 	}

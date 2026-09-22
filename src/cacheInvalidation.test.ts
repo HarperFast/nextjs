@@ -11,6 +11,7 @@ import {
 	recordInvalidation,
 	runWithConcurrency,
 	sweepTag,
+	hydrateInvalidations,
 	type InvalidationDeps,
 } from './cacheInvalidation.cjs';
 
@@ -18,7 +19,7 @@ import {
 function makeCacheTable(records: Array<{ id: string; tags: string[]; lastModified?: number; timestamp?: number }>) {
 	return {
 		records,
-		invalidated: [] as string[],
+		patched: [] as string[],
 		deleted: [] as string[],
 		search(request: { conditions: Array<{ attribute: string; comparator: string; value: unknown }>; select?: string[] }) {
 			const matches = records.filter((record) =>
@@ -33,8 +34,10 @@ function makeCacheTable(records: Array<{ id: string; tags: string[]; lastModifie
 				for (const match of matches) yield match;
 			})();
 		},
-		async invalidate(id: string) {
-			this.invalidated.push(id);
+		async patch(id: string, value: { invalidatedAt: number }) {
+			this.patched.push(id);
+			const record = records.find((candidate) => candidate.id === id);
+			if (record) (record as Record<string, unknown>).invalidatedAt = value.invalidatedAt;
 		},
 		async delete(id: string) {
 			this.deleted.push(id);
@@ -156,8 +159,8 @@ describe('sweepTag', () => {
 
 		await sweepTag('products', 1000, deps);
 
-		assert.deepEqual(isr.invalidated.sort(), ['/a', '/b']);
-		assert.deepEqual(isr.deleted, [], 'must not hard-delete');
+		assert.deepEqual(isr.patched.sort(), ['/a', '/b']);
+		assert.deepEqual(isr.deleted, [], 'must mark, not destroy — a miss costs a full render');
 	});
 
 	it('skips records written after the invalidation timestamp', async () => {
@@ -169,7 +172,7 @@ describe('sweepTag', () => {
 
 		await sweepTag('products', 1000, deps);
 
-		assert.deepEqual(isr.invalidated, ['/stale']);
+		assert.deepEqual(isr.patched, ['/stale']);
 	});
 
 	it('sweeps both cache tables, each on its own time column', async () => {
@@ -179,8 +182,8 @@ describe('sweepTag', () => {
 
 		await sweepTag('products', 1000, deps);
 
-		assert.deepEqual(isr.invalidated, ['/page']);
-		assert.deepEqual(useCache.invalidated, ['uc-1']);
+		assert.deepEqual(isr.patched, ['/page']);
+		assert.deepEqual(useCache.patched, ['uc-1']);
 	});
 
 	it('clears the invalidation row once the sweep completes', async () => {
@@ -208,7 +211,7 @@ describe('sweepTag', () => {
 
 	it('leaves the invalidation row in place when the sweep fails, so soft invalidation still covers reads', async () => {
 		const isr = makeCacheTable([{ id: '/a', tags: ['products'], lastModified: 500 }]);
-		isr.invalidate = async () => {
+		isr.patch = async () => {
 			throw new Error('boom');
 		};
 		const invalidation = makeInvalidationTable();
@@ -245,7 +248,7 @@ describe('recordInvalidation', () => {
 		await recordInvalidation([`${NEXT_IMPLICIT_TAG_PREFIX}/layout`], undefined, deps);
 		await deps.pendingSweeps?.();
 
-		assert.deepEqual(isr.invalidated, [], 'implicit tags are left to TTL');
+		assert.deepEqual(isr.patched, [], 'implicit tags are left to TTL');
 	});
 
 	it('skips sweeping when the invalidation table is over the admission threshold', async () => {
@@ -255,7 +258,59 @@ describe('recordInvalidation', () => {
 		await recordInvalidation(['products'], undefined, deps);
 		await deps.pendingSweeps?.();
 
-		assert.deepEqual(isr.invalidated, [], 'sweep is shed under backpressure; soft invalidation still applies');
+		assert.deepEqual(isr.patched, [], 'sweep is shed under backpressure; soft invalidation still applies');
+	});
+});
+
+describe('surviving a worker restart', () => {
+	beforeEach(() => cacheInvalidations.clear());
+
+	/** A tombstone table as a restarted worker would find it. */
+	function tombstoneTable(rows: Array<{ id: string; timestamp: number }>) {
+		return {
+			search() {
+				return (async function* () {
+					for (const row of rows) yield row;
+				})();
+			},
+		};
+	}
+
+	it('restores an invalidation the dead worker had only in memory', async () => {
+		// A worker invalidated a tag, then died before the entry was regenerated. Coming back with an
+		// empty map, it would serve the stale entry as fresh if the tombstone were not read back.
+		cacheInvalidations.set('products', 2000);
+		cacheInvalidations.clear();
+
+		await hydrateInvalidations(tombstoneTable([{ id: 'products', timestamp: 2000 }]));
+
+		assert.equal(
+			isInvalidated(['products'], 1000, [], []),
+			true,
+			'the invalidation did not survive the restart'
+		);
+	});
+
+	it('does not resurrect an entry written after the invalidation', async () => {
+		await hydrateInvalidations(tombstoneTable([{ id: 'products', timestamp: 2000 }]));
+
+		assert.equal(isInvalidated(['products'], 5000, [], []), false);
+	});
+
+	it('leaves the tombstone in place when the sweep fails, so the next restart still sees it', async () => {
+		const isr = makeCacheTable([{ id: '/a', tags: ['products'], lastModified: 500 }]);
+		isr.patch = async () => {
+			throw new Error('sweep died mid-run');
+		};
+		const invalidation = makeInvalidationTable();
+		const deps = makeDeps({ isr, invalidation });
+
+		await sweepTag('products', 1000, deps);
+		cacheInvalidations.clear();
+		await hydrateInvalidations(tombstoneTable([{ id: 'products', timestamp: 1000 }]));
+
+		assert.deepEqual(invalidation.deleted, []);
+		assert.equal(isInvalidated(['products'], 500, [], []), true);
 	});
 });
 

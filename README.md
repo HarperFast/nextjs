@@ -282,16 +282,19 @@ This matters more than it sounds. Next.js keeps cache lives in `SharedCacheContr
 
 ### How invalidation works
 
-The cache handler uses a **soft-invalidation** model, followed by a background sweep:
+The cache handler uses a **soft-invalidation** model:
 
 1. `revalidateTag(tag)` writes a `{ tag, timestamp }` row to the `nextjs_cache_invalidation` table and updates an in-memory map in the calling worker.
 2. Every other Harper worker subscribes to that table and updates its own map when the row is replicated — typically within milliseconds.
-3. A throttled background pass then invalidates the matching cache entries and drops the tombstone. Entries are **invalidated, not deleted**, so Next.js can still serve them stale while regenerating — an invalidation storm should not turn into a render storm.
-4. On the next `cache.get()`, an invalidated entry is reported to Next.js as *stale* rather than missing wherever Next.js supports that, so it serves the cached response and regenerates in the background.
+3. On the next `cache.get()`, an invalidated entry is reported to Next.js as *stale* rather than missing wherever Next.js supports that, so it serves the cached response and regenerates in the background. An invalidation storm should not turn into a render storm.
+4. A worker that restarts rebuilds its map from the tombstone table, so an invalidation survives the process that issued it.
 
-Because the sweep does the real work, the 7-day expiry on `nextjs_cache_invalidation` is a safety margin for sweep failure rather than a correctness parameter — the tombstone only has to outlive the sweep, not the entries it covers. While it remains, soft invalidation keeps reads correct, so a failed sweep degrades rather than loses the invalidation.
+Entries are never hard-deleted; Next.js overwrites them on the next regeneration. The `nextjs_cache_invalidation` rows expire after 7 days so abandoned tags don't accumulate.
 
-Two deliberate limits:
+> [!NOTE]
+> A throttled background sweep — which marks matching entries and then drops the tombstone, so the tombstone's lifetime stops being a correctness parameter — is implemented but **off by default**, behind `HARPER_NEXTJS_EXPERIMENTAL_SWEEP=true`. It does not yet coexist with Next.js's staleness model: Harper's `invalidate()` on a table with no `sourcedFrom` leaves the record awaiting a refresh that never arrives and blocks later reads, while writing a marker with `patch` bumps `lastModified` and makes the entry look *newer* than the invalidation, so Next.js treats it as fresh and never regenerates. Marking an entry stale without disturbing the timestamp Next.js derives staleness from needs a primitive this schema does not have yet.
+
+Two limits the sweep is designed around, for when it is enabled:
 
 - **Next.js's implicit route tags (`_N_T_…`) are never swept.** A tag like `_N_T_/layout` is carried by every page in the app, so sweeping one would scan and rewrite the entire cache. Those are left to expire.
 - **`tags` is not indexed.** Harper cannot index array elements, and the `contains` comparator cannot use an index regardless, so a sweep scans. That is why sweeps are chunked with bounded concurrency, and why broad tags are excluded rather than throttled.

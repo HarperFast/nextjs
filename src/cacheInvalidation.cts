@@ -23,6 +23,24 @@ const CHUNK_PAUSE_MAX_MS = 100;
 // covers reads, so shedding costs cache-hit rate, never correctness.
 const MAX_PENDING_INVALIDATIONS = 75_000;
 
+/**
+ * The background sweep is off by default. It works — tests cover the throttling, the race guard and the
+ * scope limits — but it does not yet coexist with Next.js's staleness model, and both failure modes are
+ * silent:
+ *
+ * - Harper's `invalidate()` on a table with no `sourcedFrom` leaves the record awaiting a refresh that
+ *   never arrives, so every later read of that key blocks.
+ * - Writing a marker with `patch` instead bumps `lastModified` (`@updatedTime`), which makes the entry
+ *   look *newer* than the invalidation to Next's own `areTagsStale`. Next then treats it as fresh and
+ *   never regenerates, so the entry is served stale indefinitely.
+ *
+ * Marking an entry stale without disturbing the timestamp Next derives staleness from needs a primitive
+ * this schema does not have yet. Until then the tombstone remains the invalidation, which is the
+ * behaviour that shipped previously and is covered by the existing tests; the 7-day expiry bounds table
+ * growth on its own.
+ */
+const SWEEP_ENABLED = process.env.HARPER_NEXTJS_EXPERIMENTAL_SWEEP === 'true';
+
 /** Tag → invalidation timestamp (ms). Shared by every cache handler in the worker. */
 export const cacheInvalidations = new Map<string, number>();
 
@@ -35,7 +53,7 @@ interface SweepableTable {
 		conditions: Array<{ attribute: string; comparator: string; value: unknown }>;
 		select?: string[];
 	}): AsyncIterable<CacheRecord>;
-	invalidate(id: string): Promise<unknown> | unknown;
+	patch(id: string, value: { invalidatedAt: number }): Promise<unknown> | unknown;
 }
 
 interface InvalidationTable {
@@ -97,15 +115,25 @@ export async function runWithConcurrency<T>(
 
 /** Only explicit user tags are swept; see NEXT_IMPLICIT_TAG_PREFIX. */
 export function isSweepableTag(tag: string): boolean {
+
 	return !tag.startsWith(NEXT_IMPLICIT_TAG_PREFIX);
 }
 
+/**
+ * `markedInvalidAt` is the record's own `invalidatedAt`, written by the sweep. It has to be consulted
+ * separately because the sweep's write bumps `lastModified`, which would otherwise make the tag
+ * timestamps below stop matching — and because the tombstone is dropped once the sweep finishes, so
+ * after that the record's own marker is the only remaining evidence.
+ */
 export function isInvalidated(
 	recordTags: string[],
 	lastModified: number,
 	revalidatedTags: string[],
-	ctxTags: string[]
+	ctxTags: string[],
+	markedInvalidAt?: number
 ): boolean {
+	if (typeof markedInvalidAt === 'number' && markedInvalidAt > 0) return true;
+
 	const allTags = recordTags.length > 0 ? recordTags : ctxTags;
 	for (const tag of allTags) {
 		if (revalidatedTags.includes(tag)) return true;
@@ -153,6 +181,24 @@ interface SubscribableTable {
  * This is why `refreshTags()` on the "use cache" handler is a no-op: the framework expects handlers to
  * poll a tags service, and Harper pushes instead.
  */
+/**
+ * Rebuild the in-memory invalidation map from the tombstone table.
+ *
+ * This is what makes an invalidation survive the process holding it. The map is worker-local, so a
+ * worker that dies between `revalidateTag` and the entry being regenerated would otherwise come back
+ * with no record of the invalidation and start serving the stale entry as though it were fresh. The
+ * tombstone is the durable half of that pair, and this is the half that reads it back.
+ */
+export async function hydrateInvalidations(
+	table: Pick<SubscribableTable, 'search'>,
+	deps: InvalidationDeps = {}
+): Promise<void> {
+	for await (const row of table.search()) {
+		cacheInvalidations.set(row.id, row.timestamp);
+		mirrorToNextTagsManifest([row.id], row.timestamp, deps);
+	}
+}
+
 export async function initializeInvalidationSubscription(deps: InvalidationDeps = {}): Promise<void> {
 	if (subscriptionInitialized) return;
 	const databases = getDatabases(deps);
@@ -169,10 +215,7 @@ export async function initializeInvalidationSubscription(deps: InvalidationDeps 
 	}
 
 	try {
-		for await (const row of table.search()) {
-			cacheInvalidations.set(row.id, row.timestamp);
-			mirrorToNextTagsManifest([row.id], row.timestamp, deps);
-		}
+		await hydrateInvalidations(table, deps);
 
 		const subscription = await table.subscribe({ omitCurrent: true });
 
@@ -235,7 +278,7 @@ async function sweepTable(
 	const batches = chunk(ids, INVALIDATE_CHUNK_SIZE);
 	for (let index = 0; index < batches.length; index++) {
 		await runWithConcurrency(batches[index], INVALIDATE_CONCURRENCY, async (id) => {
-			await table.invalidate(id);
+			await table.patch(id, { invalidatedAt: timestamp });
 		});
 		if (index < batches.length - 1) {
 			await sleep(jitter(CHUNK_PAUSE_MAX_MS));
@@ -320,6 +363,9 @@ export async function recordInvalidation(
 		);
 		return;
 	}
+
+	// `deps.scheduleSweep` is how the tests drive the sweep regardless of the default.
+	if (!SWEEP_ENABLED && !deps.scheduleSweep) return;
 
 	const schedule = deps.scheduleSweep ?? ((task: () => Promise<void>) => void task());
 	for (const tag of tags) {
