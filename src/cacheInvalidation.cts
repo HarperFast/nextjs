@@ -25,19 +25,24 @@ const MAX_PENDING_INVALIDATIONS = 75_000;
 
 /**
  * The background sweep is off by default. It works — tests cover the throttling, the race guard and the
- * scope limits — but it does not yet coexist with Next.js's staleness model, and both failure modes are
- * silent:
+ * scope limits — but no available primitive marks an entry stale without breaking something else, and
+ * every failure mode is silent:
  *
- * - Harper's `invalidate()` on a table with no `sourcedFrom` leaves the record awaiting a refresh that
- *   never arrives, so every later read of that key blocks.
- * - Writing a marker with `patch` instead bumps `lastModified` (`@updatedTime`), which makes the entry
- *   look *newer* than the invalidation to Next's own `areTagsStale`. Next then treats it as fresh and
- *   never regenerates, so the entry is served stale indefinitely.
+ * - `invalidate()` is a NO-OP. Measured against Harper 5.1.23 and 5.2.0, on a plain table and on a
+ *   `sourcedFrom` one: the record reads back unchanged and the source is never re-invoked. A sweep
+ *   built on it leaves every entry untouched while still dropping the tombstone, which loses the
+ *   invalidation outright — worse than not sweeping.
+ * - `delete()` works, but a deleted entry is a miss, and a miss is a full render. Discarding entries
+ *   on invalidation is what this design exists to avoid.
+ * - `patch()` writing an explicit marker bumps `lastModified` (`@updatedTime`), so the entry looks
+ *   *newer* than the invalidation to Next's own `areTagsStale`. Next then treats it as fresh and never
+ *   regenerates, serving it stale indefinitely.
  *
  * Marking an entry stale without disturbing the timestamp Next derives staleness from needs a primitive
- * this schema does not have yet. Until then the tombstone remains the invalidation, which is the
- * behaviour that shipped previously and is covered by the existing tests; the 7-day expiry bounds table
- * growth on its own.
+ * that does not exist yet. Until then the tombstone remains the invalidation, which is the behaviour
+ * that shipped previously and is covered by the existing tests; the 7-day expiry bounds table growth on
+ * its own, and stale-while-revalidate comes from the tags-manifest mirror at read time rather than from
+ * anything the sweep does.
  */
 const SWEEP_ENABLED = process.env.HARPER_NEXTJS_EXPERIMENTAL_SWEEP === 'true';
 

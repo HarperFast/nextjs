@@ -57,6 +57,23 @@ export default withHarper({
   package: '@harperfast/nextjs'
 ```
 
+> [!WARNING]
+> **Declare `rest` (and any `jsResource`) *before* this plugin.** The plugin registers an HTTP handler that claims every path, so anything declared after it is shadowed by Next.js:
+>
+> ```yaml
+> rest: true            # must come first
+>
+> graphqlSchema:
+>   files: 'schema.graphql'
+> jsResource:
+>   files: 'resources.js'
+>
+> '@harperfast/nextjs':  # last, so it only handles what is left
+>   package: '@harperfast/nextjs'
+> ```
+>
+> Declared after the plugin, `GET /MyTable/123` returns Next.js's 404 and `GET /MyResource/` returns its 308 trailing-slash redirect, with nothing in the logs to say why. Ordering it first costs nothing — Next.js still serves every application route.
+
 4. Run your app with Harper v5:
 
 ```sh
@@ -276,9 +293,16 @@ Requires Next.js 16, which is where the interface exists. Opt-in for now — it 
 
 ### Per-entry cache lives
 
-The handler persists the `revalidate` and `expire` Next.js supplies for each entry.
+Both handlers persist the `revalidate` and `expire` Next.js supplies for each entry.
 
-This matters more than it sounds. Next.js keeps cache lives in `SharedCacheControls` — a per-process `Map` plus the build-time prerender manifest — and neither replicates. Without persisting them, an entry reaches another node but its cache lives do not, and that node falls back to Next.js's 1-second default, so the entry looks stale on almost every read. Persisting them is what makes cache lives coherent across the cluster.
+For the `'use cache'` handler this is load-bearing, not a nicety. Cache lives travel on the entry itself, so a row stored without them reads back as `revalidate: 0`, Next.js treats it as immediately stale, and the entry is regenerated on **every single read** — a cache that stores faithfully and never serves. Measured on a two-node cluster, the same key read ten times from the non-writing node:
+
+| Build | Regenerations per 10 reads |
+| --- | --- |
+| Without persisted cache lives | 10 / 10 |
+| With persisted cache lives | 0 / 10 |
+
+The legacy incremental-cache handler persists them too, but there the effect is not observable: a `FETCH` entry carries its own `revalidate` inside the cached value, and route cache lives come from the build-time prerender manifest, which ships with `.next` to every node. The columns are stored for consistency and for entry classes that carry neither, not because a measured failure demanded it.
 
 ### How invalidation works
 
@@ -292,7 +316,15 @@ The cache handler uses a **soft-invalidation** model:
 Entries are never hard-deleted; Next.js overwrites them on the next regeneration. The `nextjs_cache_invalidation` rows expire after 7 days so abandoned tags don't accumulate.
 
 > [!NOTE]
-> A throttled background sweep — which marks matching entries and then drops the tombstone, so the tombstone's lifetime stops being a correctness parameter — is implemented but **off by default**, behind `HARPER_NEXTJS_EXPERIMENTAL_SWEEP=true`. It does not yet coexist with Next.js's staleness model: Harper's `invalidate()` on a table with no `sourcedFrom` leaves the record awaiting a refresh that never arrives and blocks later reads, while writing a marker with `patch` bumps `lastModified` and makes the entry look *newer* than the invalidation, so Next.js treats it as fresh and never regenerates. Marking an entry stale without disturbing the timestamp Next.js derives staleness from needs a primitive this schema does not have yet.
+> A throttled background sweep — which would mark matching entries and then drop the tombstone, so the tombstone's lifetime stops being a correctness parameter — is implemented but **off by default**, behind `HARPER_NEXTJS_EXPERIMENTAL_SWEEP=true`. No available primitive marks an entry stale without breaking something else:
+>
+> | Primitive | Behaviour |
+> | --- | --- |
+> | `invalidate()` | A no-op. Measured on Harper 5.1.23 and 5.2.0, against both a plain table and a `sourcedFrom` one: the record reads back unchanged and the source is never re-invoked. A sweep built on it drops the tombstone while leaving entries untouched, losing the invalidation outright. |
+> | `delete()` | Works, but a deleted entry is a miss, and a miss is a full render — the thing this design exists to avoid. |
+> | `patch()` | Bumps `lastModified` (`@updatedTime`), so the entry looks *newer* than the invalidation to Next.js's `areTagsStale`. Next.js treats it as fresh and never regenerates. |
+>
+> Stale-while-revalidate comes from the tags-manifest mirror at read time, not from the sweep, so leaving the sweep off costs only tombstone-table growth — which the 7-day expiry already bounds.
 
 Two limits the sweep is designed around, for when it is enabled:
 
