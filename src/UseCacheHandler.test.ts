@@ -1,0 +1,240 @@
+import { describe, it, beforeEach } from 'node:test';
+import assert from 'node:assert';
+import { createRequire } from 'node:module';
+
+import { cacheInvalidations } from './cacheInvalidation.cjs';
+
+interface UseCacheEntry {
+	value: ReadableStream<Uint8Array>;
+	tags: string[];
+	stale: number;
+	timestamp: number;
+	expire: number;
+	revalidate: number;
+}
+
+interface UseCacheHandler {
+	get(cacheKey: string, softTags: string[]): Promise<UseCacheEntry | undefined>;
+	set(cacheKey: string, pendingEntry: Promise<UseCacheEntry>): Promise<void>;
+	refreshTags(): Promise<void>;
+	getExpiration(tags: string[]): Promise<number>;
+	updateTags(tags: string[], durations?: { expire?: number }): Promise<void>;
+}
+
+// Next loads this module with `interopDefault(await import(...))` and uses the result directly, so the
+// default export is an instance rather than a class.
+const handler = createRequire(import.meta.url)('./UseCacheHandler.cjs').default as UseCacheHandler;
+
+function streamOf(text: string): ReadableStream<Uint8Array> {
+	return new ReadableStream({
+		start(controller) {
+			controller.enqueue(new TextEncoder().encode(text));
+			controller.close();
+		},
+	});
+}
+
+function erroringStream(partial: string): ReadableStream<Uint8Array> {
+	return new ReadableStream({
+		start(controller) {
+			controller.enqueue(new TextEncoder().encode(partial));
+			controller.error(new Error('render aborted'));
+		},
+	});
+}
+
+async function readAll(stream: ReadableStream<Uint8Array>): Promise<string> {
+	const chunks: Uint8Array[] = [];
+	const reader = stream.getReader();
+	for (;;) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		if (value) chunks.push(value);
+	}
+	return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString('utf8');
+}
+
+function entry(overrides: Partial<UseCacheEntry> = {}): UseCacheEntry {
+	return {
+		value: streamOf('hello'),
+		tags: [],
+		stale: 60,
+		timestamp: Date.now(),
+		expire: 3600,
+		revalidate: 300,
+		...overrides,
+	};
+}
+
+function installDatabases() {
+	const rows = new Map<string, Record<string, unknown>>();
+	(globalThis as Record<string, unknown>).databases = {
+		harperfast_nextjs: {
+			nextjs_use_cache: {
+				async get(key: string) {
+					return rows.get(key);
+				},
+				async put(key: string, value: Record<string, unknown>) {
+					rows.set(key, { id: key, ...value });
+				},
+				search() {
+					return (async function* () {})();
+				},
+				async invalidate() {},
+			},
+			nextjs_isr_cache: {
+				search() {
+					return (async function* () {})();
+				},
+				async invalidate() {},
+			},
+			nextjs_cache_invalidation: {
+				puts: [] as Array<{ key: string; value: { timestamp: number } }>,
+				async put(key: string, value: { timestamp: number }) {
+					this.puts.push({ key, value });
+				},
+				async delete() {},
+				async getRecordCount() {
+					return { recordCount: 0 };
+				},
+			},
+		},
+	};
+	return rows;
+}
+
+describe('UseCacheHandler streaming', () => {
+	beforeEach(() => {
+		cacheInvalidations.clear();
+		installDatabases();
+	});
+
+	it('round-trips a cached value', async () => {
+		await handler.set('k1', Promise.resolve(entry({ value: streamOf('payload') })));
+
+		const result = await handler.get('k1', []);
+
+		assert.ok(result);
+		assert.equal(await readAll(result.value), 'payload');
+	});
+
+	it('hands every reader its own stream', async () => {
+		await handler.set('k2', Promise.resolve(entry({ value: streamOf('payload') })));
+
+		const first = await handler.get('k2', []);
+		const second = await handler.get('k2', []);
+
+		assert.ok(first && second);
+		// A shared stream would leave the second reader with an empty (already-consumed) body.
+		assert.equal(await readAll(first.value), 'payload');
+		assert.equal(await readAll(second.value), 'payload');
+	});
+
+	it('persists nothing when the value stream errors part way', async () => {
+		await handler.set('k3', Promise.resolve(entry({ value: erroringStream('half') })));
+
+		assert.equal(await handler.get('k3', []), undefined, 'a partial render must not be cached');
+	});
+
+	it('persists nothing when the pending entry itself rejects', async () => {
+		await handler.set('k4', Promise.reject(new Error('render failed')));
+
+		assert.equal(await handler.get('k4', []), undefined);
+	});
+
+	it('makes a concurrent get wait for an in-flight set rather than reporting a miss', async () => {
+		let release: (value: UseCacheEntry) => void = () => {};
+		const pending = new Promise<UseCacheEntry>((resolve) => {
+			release = resolve;
+		});
+
+		// Not awaited: the contract is that `get` observes the in-flight set synchronously.
+		const setPromise = handler.set('k5', pending);
+		const getPromise = handler.get('k5', []);
+
+		release(entry({ value: streamOf('deferred') }));
+		await setPromise;
+
+		const result = await getPromise;
+		assert.ok(result, 'a concurrent get must wait, not return undefined');
+		assert.equal(await readAll(result.value), 'deferred');
+	});
+});
+
+describe('UseCacheHandler cache lives', () => {
+	beforeEach(() => {
+		cacheInvalidations.clear();
+		installDatabases();
+	});
+
+	it('withholds an entry past its expire window', async () => {
+		await handler.set(
+			'expired',
+			Promise.resolve(entry({ timestamp: Date.now() - 120_000, expire: 60 }))
+		);
+
+		assert.equal(await handler.get('expired', []), undefined);
+	});
+
+	it('preserves the entry cache lives across the round trip', async () => {
+		await handler.set('lives', Promise.resolve(entry({ stale: 30, revalidate: 120, expire: 900 })));
+
+		const result = await handler.get('lives', []);
+
+		assert.ok(result);
+		assert.equal(result.stale, 30);
+		assert.equal(result.revalidate, 120);
+		assert.equal(result.expire, 900);
+	});
+});
+
+describe('UseCacheHandler tags', () => {
+	beforeEach(() => {
+		cacheInvalidations.clear();
+		installDatabases();
+	});
+
+	it('reports the newest invalidation timestamp for the given tags', async () => {
+		cacheInvalidations.set('a', 1000);
+		cacheInvalidations.set('b', 5000);
+
+		assert.equal(await handler.getExpiration(['a', 'b']), 5000);
+	});
+
+	it('reports 0 when no tag was ever invalidated', async () => {
+		assert.equal(await handler.getExpiration(['never']), 0);
+	});
+
+	it('records an invalidation for every tag', async () => {
+		await handler.updateTags(['products'], undefined);
+
+		assert.ok(cacheInvalidations.has('products'));
+	});
+
+	it('serves an invalidated entry as stale rather than missing, while it is still inside expire', async () => {
+		const now = Date.now();
+		await handler.set(
+			'tagged',
+			Promise.resolve(entry({ tags: ['products'], timestamp: now, revalidate: 300, expire: 3600 }))
+		);
+		cacheInvalidations.set('products', now + 1000);
+
+		const result = await handler.get('tagged', []);
+
+		assert.ok(result, 'a miss here costs a full render; stale-then-regenerate is the point');
+		// Backdated past its revalidate window so Next regenerates, but still inside expire so it is usable.
+		assert.ok(result.timestamp + result.revalidate * 1000 < Date.now());
+		assert.ok(result.timestamp + result.expire * 1000 > Date.now());
+	});
+
+	it('withholds an invalidated entry that is also past expire', async () => {
+		const now = Date.now();
+		await handler.set(
+			'gone',
+			Promise.resolve(entry({ tags: ['products'], timestamp: now - 120_000, revalidate: 10, expire: 60 }))
+		);
+		cacheInvalidations.set('products', now);
+
+		assert.equal(await handler.get('gone', []), undefined);
+	});
+});
