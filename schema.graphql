@@ -35,7 +35,12 @@ type NextISRCache @table(database: "harperfast_nextjs", table: "nextjs_isr_cache
 # a use-cache entry is an opaque byte stream with its own timestamp and cache lives, not a structured
 # IncrementalCacheValue keyed off the route.
 type NextUseCache @table(database: "harperfast_nextjs", table: "nextjs_use_cache", expiration: 604800) {
+	# `id` is the STORAGE key: the Next cache key verbatim when it fits, else truncated
+	# with a hash of the full key appended. See toStorageKey() in src/UseCacheHandler.cts —
+	# Next puts no size limit on a cache key and Harper caps a primary key at 1978 bytes.
 	id: String @primaryKey
+	# The untruncated Next cache key, when `id` had to be shortened. Not indexed.
+	cacheKey: String
 	value: Blob
 	tags: [String]
 	timestamp: Long @indexed

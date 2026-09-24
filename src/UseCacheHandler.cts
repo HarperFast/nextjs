@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { CacheEntry, CacheHandler, Timestamp } from 'next/dist/server/lib/cache-handlers/types.d.ts';
 
 import type { databases as DatabasesType } from 'harper';
@@ -76,6 +77,42 @@ async function drain(stream: ReadableStream<Uint8Array>): Promise<Buffer | undef
 	return Buffer.concat(chunks);
 }
 
+/**
+ * Harper's primary key limit is MAX_KEY_BYTES = 1978 (harper/resources/Table.ts:146).
+ * Next imposes NO size limit on a "use cache" key — it is composed from the cached
+ * component's serializable props, so a component handed a large prop produces a
+ * correspondingly large key. Observed in the wild at 87,465 bytes, which Harper
+ * rejects with `Primary key size is too large`. The rejection surfaces as a rejected
+ * cache boundary, which aborts the streamed subtree: a dead page with nothing in the
+ * server log, because the error is a Next streaming rejection rather than a Harper one.
+ *
+ * Oversized keys are truncated and suffixed with a hash of the FULL key. Short keys are
+ * passed through untouched, deliberately: hashing unconditionally would change every
+ * key and silently invalidate the whole cache on upgrade, and it would throw away a
+ * readable id for no benefit.
+ *
+ * Budgeted well under 1978 rather than up to it — Harper's check serializes the key, and
+ * the encoded form can exceed the raw byte count.
+ */
+const MAX_KEY_BYTES = 1500;
+const KEY_HASH_BYTES = 16;
+/** Cannot occur in a Next cache key, so a short key can never collide with a truncated one. */
+const KEY_HASH_SEPARATOR = '\u0000#';
+
+export function toStorageKey(cacheKey: string): string {
+	if (Buffer.byteLength(cacheKey, 'utf8') <= MAX_KEY_BYTES) return cacheKey;
+
+	const digest = createHash('sha256').update(cacheKey, 'utf8').digest('hex').slice(0, KEY_HASH_BYTES);
+	const budget = MAX_KEY_BYTES - Buffer.byteLength(KEY_HASH_SEPARATOR, 'utf8') - digest.length;
+
+	// Truncate by BYTES on a character boundary. Slicing by .length would overshoot on
+	// multi-byte input, and slicing mid-codepoint could re-encode differently on another
+	// node — two nodes must derive the same key for the same entry.
+	const truncated = Buffer.from(cacheKey, 'utf8').subarray(0, budget).toString('utf8').replace(/\uFFFD+$/, '');
+
+	return `${truncated}${KEY_HASH_SEPARATOR}${digest}`;
+}
+
 /** Harper returns a Blob for a Blob column; unit tests and older rows may hold raw bytes. */
 async function toBuffer(value: unknown): Promise<Buffer | undefined> {
 	if (value === undefined || value === null) return undefined;
@@ -140,7 +177,7 @@ class HarperUseCacheHandler implements CacheHandler {
 		const pending = pendingEntries.get(cacheKey);
 		if (pending) await pending;
 
-		const record = await table.get(cacheKey);
+		const record = await table.get(toStorageKey(cacheKey));
 		if (!record) return undefined;
 
 		const bytes = await toBuffer(record.value);
@@ -190,7 +227,9 @@ class HarperUseCacheHandler implements CacheHandler {
 			const bytes = await drain(entry.value);
 			if (!bytes) return undefined;
 
-			await table.put(cacheKey, {
+			await table.put(toStorageKey(cacheKey), {
+				// The untruncated key, for identifying a row whose id was hashed. Not indexed.
+				cacheKey,
 				value: toStoredValue(bytes),
 				tags: entry.tags ?? [],
 				timestamp: toInteger(entry.timestamp) ?? Date.now(),

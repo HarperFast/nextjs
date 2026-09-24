@@ -3,6 +3,7 @@ import assert from 'node:assert';
 import { createRequire } from 'node:module';
 
 import { cacheInvalidations } from './cacheInvalidation.cjs';
+import { toStorageKey } from './UseCacheHandler.cjs';
 
 interface UseCacheEntry {
 	value: ReadableStream<Uint8Array>;
@@ -73,6 +74,21 @@ function entry(overrides: Partial<UseCacheEntry> = {}): UseCacheEntry {
  */
 const INTEGER_COLUMNS = ['timestamp', 'stale', 'revalidate', 'expire'];
 
+/**
+ * Harper caps a primary key at MAX_KEY_BYTES = 1978 (harper/resources/Table.ts:146) and
+ * throws `Primary key size is too large`. The mock must too: Next puts no limit on a
+ * "use cache" key, and a mock that accepts any key is exactly how an 87,465-byte key
+ * reached production and killed the stream.
+ */
+const HARPER_MAX_KEY_BYTES = 1978;
+
+function enforcePrimaryKey(key: string) {
+	const bytes = Buffer.byteLength(String(key), 'utf8');
+	if (bytes > HARPER_MAX_KEY_BYTES) {
+		throw new Error(`Primary key size is too large: ${bytes}`);
+	}
+}
+
 function enforceSchema(value: Record<string, unknown>) {
 	for (const column of INTEGER_COLUMNS) {
 		const columnValue = value[column];
@@ -91,6 +107,7 @@ function installDatabases() {
 					return rows.get(key);
 				},
 				async put(key: string, value: Record<string, unknown>) {
+					enforcePrimaryKey(key);
 					enforceSchema(value);
 					rows.set(key, { id: key, ...value });
 				},
@@ -282,5 +299,71 @@ describe('UseCacheHandler tags', () => {
 		cacheInvalidations.set('products', now);
 
 		assert.equal(await handler.get('gone', []), undefined);
+	});
+
+});
+
+describe('UseCacheHandler oversized keys', () => {
+	let rows: Map<string, Record<string, unknown>>;
+
+	beforeEach(() => {
+		cacheInvalidations.clear();
+		rows = installDatabases();
+	});
+
+	it('passes a short key through untouched, so upgrading does not invalidate the cache', () => {
+		const key = 'a'.repeat(200);
+		assert.equal(toStorageKey(key), key);
+	});
+
+	it('keeps an oversized key under the Harper primary-key limit', () => {
+		const stored = toStorageKey('x'.repeat(87465));
+		assert.ok(Buffer.byteLength(stored, 'utf8') <= HARPER_MAX_KEY_BYTES);
+	});
+
+	it('keeps distinct oversized keys distinct', () => {
+		assert.notEqual(toStorageKey('x'.repeat(90000) + 'A'), toStorageKey('x'.repeat(90000) + 'B'));
+	});
+
+	it('is deterministic, so every node derives the same key', () => {
+		const key = 'y'.repeat(90000);
+		assert.equal(toStorageKey(key), toStorageKey(key));
+	});
+
+	it('does not split a multi-byte character', () => {
+		const stored = toStorageKey('\u00e9'.repeat(60000));
+		assert.ok(!stored.includes('\uFFFD'), 'truncation left a replacement character');
+	});
+
+	// The real failure: an 87,465-byte key from a component handed a large prop.
+	it('round-trips an oversized entry through set and get', async () => {
+		const key = 'z'.repeat(87465);
+		await handler.set(key, Promise.resolve(entry({ value: streamOf('big') })));
+
+		const result = await handler.get(key, []);
+
+		assert.ok(result, 'an oversized key must not be rejected by the primary-key limit');
+		assert.equal(await readAll(result.value), 'big');
+	});
+
+	// A key-mangling function is only correct if EVERY table access applies it. A get that
+	// skips it misses forever, silently — which is the shape of bug this whole change exists for.
+	it('never hands a raw oversized key to the table', async () => {
+		const key = 'q'.repeat(87465);
+		await handler.set(key, Promise.resolve(entry({ value: streamOf('v') })));
+		await handler.get(key, []);
+
+		assert.ok(rows.size > 0, 'nothing was stored');
+		for (const id of rows.keys()) {
+			assert.ok(Buffer.byteLength(id, 'utf8') <= HARPER_MAX_KEY_BYTES, `raw key reached the table: ${id.length}`);
+		}
+	});
+
+	it('preserves the untruncated key on the row for debuggability', async () => {
+		const key = 'w'.repeat(87465);
+		await handler.set(key, Promise.resolve(entry({ value: streamOf('v') })));
+
+		const [row] = [...rows.values()];
+		assert.equal(row.cacheKey, key);
 	});
 });
