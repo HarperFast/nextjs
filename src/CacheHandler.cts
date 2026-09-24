@@ -14,68 +14,27 @@ import type {
 
 import type { databases as DatabasesType } from 'harper';
 
+import { initializeInvalidationSubscription, isInvalidated, recordInvalidation } from './cacheInvalidation.cjs';
+
 const NEXT_CACHE_TAGS_HEADER = 'x-next-cache-tags';
 
-// Map of tag → invalidation timestamp (ms). Hydrated from the
-// nextjs_cache_invalidation table on first construction and kept fresh via a
-// Harper subscription so any worker observes invalidations from any other.
-const cacheInvalidations = new Map<string, number>();
+// Kinds for which Next re-checks its tags manifest and can classify an entry as *stale* rather than
+// missing. For anything else an invalidated entry has to be withheld, because Next would otherwise
+// serve it indefinitely.
+const TAG_AWARE_KINDS = new Set(['APP_PAGE', 'APP_ROUTE']);
 
-let subscriptionInitialized = false;
-
-// `databases` is a Harper-provided global. Access it lazily so that loading
-// this module from a non-Harper context (e.g. a turbopack build worker that
-// resolves the cacheHandler path) does not pull in the harper runtime — which
-// would register native worker hooks a second time and crash with
+// `databases` is a Harper-provided global. Access it lazily so that loading this module from a
+// non-Harper context (e.g. a turbopack build worker that resolves the cacheHandler path) does not pull
+// in the harper runtime — which would register native worker hooks a second time and crash with
 // "Worker creator already registered".
 function getDatabases(): typeof DatabasesType | undefined {
 	return (globalThis as { databases?: typeof DatabasesType }).databases;
 }
 
-async function initializeSubscription(): Promise<void> {
-	if (subscriptionInitialized) return;
-	const databases = getDatabases();
-	if (!databases) return;
-	subscriptionInitialized = true;
-
-	// Harper's TypeScript types require RequestTarget/SubscriptionRequest objects,
-	// but the runtime accepts plain object literals (and search() accepts no args).
-	const table = databases.harperfast_nextjs.nextjs_cache_invalidation as unknown as {
-		search: () => AsyncIterable<{ id: string; timestamp: number }>;
-		subscribe: (req: { omitCurrent?: boolean }) => Promise<{
-			on: (event: string, listener: (e: { type: string; id: string; value?: { timestamp: number } }) => void) => void;
-		}>;
-	};
-
-	try {
-		for await (const row of table.search()) {
-			cacheInvalidations.set(row.id, row.timestamp);
-		}
-
-		const subscription = await table.subscribe({ omitCurrent: true });
-
-		subscription.on('data', (event) => {
-			if (!event.id) return;
-			if (event.type === 'delete') {
-				cacheInvalidations.delete(event.id);
-			} else if (event.type === 'put' && event.value) {
-				cacheInvalidations.set(event.id, event.value.timestamp);
-			}
-		});
-
-		subscription.on('error', (error) => {
-			console.error('[CacheHandler] invalidation subscription error', error);
-		});
-	} catch (error) {
-		// Reset so a future construction can retry — failure here means we lose
-		// cross-worker visibility, but the cache still works (just falls back to
-		// per-request revalidatedTags).
-		subscriptionInitialized = false;
-		console.error('[CacheHandler] failed to initialize invalidation subscription', error);
-	}
-}
-
-function extractTags(data: IncrementalCacheValue | null, ctx: SetIncrementalFetchCacheContext | SetIncrementalResponseCacheContext): string[] {
+function extractTags(
+	data: IncrementalCacheValue | null,
+	ctx: SetIncrementalFetchCacheContext | SetIncrementalResponseCacheContext
+): string[] {
 	if (!data) return [];
 
 	// FETCH entries carry tags via ctx.tags (set context) and data.tags.
@@ -88,30 +47,36 @@ function extractTags(data: IncrementalCacheValue | null, ctx: SetIncrementalFetc
 	const headers = (data as { headers?: Record<string, unknown> }).headers;
 	const tagsHeader = headers?.[NEXT_CACHE_TAGS_HEADER];
 	if (typeof tagsHeader === 'string' && tagsHeader.length > 0) {
-		return tagsHeader.split(',').map((t) => t.trim()).filter(Boolean);
+		return tagsHeader
+			.split(',')
+			.map((tag) => tag.trim())
+			.filter(Boolean);
 	}
 
 	const dataTags = (data as { tags?: unknown }).tags;
 	if (Array.isArray(dataTags)) {
-		return dataTags.filter((t): t is string => typeof t === 'string');
+		return dataTags.filter((tag): tag is string => typeof tag === 'string');
 	}
 
 	return [];
 }
 
-function isInvalidated(
-	recordTags: string[],
-	lastModified: number,
-	revalidatedTags: string[],
-	ctxTags: string[]
-): boolean {
-	const allTags = recordTags.length > 0 ? recordTags : ctxTags;
-	for (const tag of allTags) {
-		if (revalidatedTags.includes(tag)) return true;
-		const invalidatedAt = cacheInvalidations.get(tag);
-		if (invalidatedAt !== undefined && invalidatedAt > lastModified) return true;
-	}
-	return false;
+/**
+ * True when Next will consult its own tags manifest for this entry and can therefore classify it as
+ * stale. `recordInvalidation` mirrors every invalidation into that manifest, so for these kinds the
+ * handler can return the entry and let Next serve it stale while regenerating, instead of forcing a
+ * blocking miss.
+ */
+function canServeStale(data: unknown): boolean {
+	const value = data as { kind?: string; headers?: Record<string, unknown> } | null;
+	if (!value?.kind || !TAG_AWARE_KINDS.has(value.kind)) return false;
+	return typeof value.headers?.[NEXT_CACHE_TAGS_HEADER] === 'string';
+}
+
+function isExpired(record: { lastModified?: number; expire?: number }): boolean {
+	if (typeof record.expire !== 'number' || record.expire <= 0) return false;
+	const lastModified = record.lastModified ?? 0;
+	return lastModified + record.expire * 1000 < Date.now();
 }
 
 export default class HarperCacheHandler implements CacheHandler {
@@ -119,7 +84,7 @@ export default class HarperCacheHandler implements CacheHandler {
 
 	constructor(ctx?: CacheHandlerContext) {
 		this.revalidatedTags = ctx?.revalidatedTags ?? [];
-		void initializeSubscription();
+		void initializeInvalidationSubscription();
 	}
 
 	async get(
@@ -133,15 +98,25 @@ export default class HarperCacheHandler implements CacheHandler {
 		const record = await table.get(key);
 		if (!record) return null;
 
+		// Past its own `expire` the entry is no longer usable at all, regardless of tags.
+		if (isExpired(record as { lastModified?: number; expire?: number })) return null;
+
 		const recordTags = Array.isArray(record.tags) ? (record.tags as string[]) : [];
 
 		const ctxTags =
 			'tags' in ctx && Array.isArray(ctx.tags)
-				? [...ctx.tags, ...(('softTags' in ctx && Array.isArray(ctx.softTags)) ? ctx.softTags : [])]
+				? [...ctx.tags, ...('softTags' in ctx && Array.isArray(ctx.softTags) ? ctx.softTags : [])]
 				: [];
 
-		if (isInvalidated(recordTags, record.lastModified ?? 0, this.revalidatedTags, ctxTags)) {
-			return null;
+		const markedInvalidAt = (record as { invalidatedAt?: number }).invalidatedAt;
+
+		if (isInvalidated(recordTags, record.lastModified ?? 0, this.revalidatedTags, ctxTags, markedInvalidAt)) {
+			// An on-demand revalidation for this request is an explicit demand for fresh content.
+			if (recordTags.some((tag) => this.revalidatedTags.includes(tag))) return null;
+
+			// Otherwise prefer stale-while-revalidate where Next supports it: a miss here costs a full
+			// blocking render, which is exactly what an invalidation storm must not produce.
+			if (!canServeStale(record.data)) return null;
 		}
 
 		return {
@@ -160,26 +135,22 @@ export default class HarperCacheHandler implements CacheHandler {
 
 		const table = databases.harperfast_nextjs.nextjs_isr_cache;
 		const tags = extractTags(data, ctx);
-		await table.put(key, { data, tags });
+
+		// Next keeps cache lives in a per-process Map plus the build-time prerender manifest, neither of
+		// which replicates. Persisting them alongside the entry is what lets another node compute the
+		// same staleness instead of falling back to `calculateRevalidate`'s 1-second default.
+		// Floored because Harper rejects a non-integer for an Int column, and a rejected write here is
+		// silent — the entry simply never lands.
+		const cacheControl = 'cacheControl' in ctx ? ctx.cacheControl : undefined;
+		const revalidate = typeof cacheControl?.revalidate === 'number' ? Math.floor(cacheControl.revalidate) : undefined;
+		const expire = typeof cacheControl?.expire === 'number' ? Math.floor(cacheControl.expire) : undefined;
+
+		await table.put(key, { data, tags, revalidate, expire });
 	}
 
-	async revalidateTag(tags: string | string[]): Promise<void> {
+	async revalidateTag(tags: string | string[], durations?: { expire?: number }): Promise<void> {
 		const tagList = typeof tags === 'string' ? [tags] : tags;
-		if (tagList.length === 0) return;
-
-		const databases = getDatabases();
-		if (!databases) return;
-
-		const table = databases.harperfast_nextjs.nextjs_cache_invalidation;
-		const timestamp = Date.now();
-
-		// Update the local map immediately so reads on this worker see the
-		// invalidation without waiting for the subscription roundtrip.
-		for (const tag of tagList) {
-			cacheInvalidations.set(tag, timestamp);
-		}
-
-		await Promise.all(tagList.map((tag) => table.put(tag, { timestamp })));
+		await recordInvalidation(tagList, durations);
 	}
 
 	resetRequestCache(): void {}

@@ -1,0 +1,6 @@
+# A plain replicated table, so the rig can prove replication independently of the cache handlers.
+type RigMarker @table(database: "rig") @export {
+	id: ID @primaryKey
+	node: String
+	at: Long
+}

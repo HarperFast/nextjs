@@ -1,0 +1,11 @@
+{
+	"name": "next-16-cluster",
+	"private": true,
+	"scripts": { "build": "next build", "start": "next start" },
+	"dependencies": {
+		"@harperfast/nextjs": "file:../../",
+		"react": "^19",
+		"react-dom": "^19",
+		"next": "^16"
+	}
+}

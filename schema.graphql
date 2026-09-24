@@ -9,11 +9,45 @@ type NextBuildInfo @table(database: "harperfast_nextjs", table: "nextjs_build_in
 	status: String
 }
 
+# `revalidate`/`expire` mirror the `cacheControl` Next.js supplies on set. Next keeps its own copy in a
+# per-process Map plus the build-time prerender manifest, and neither replicates — so without these columns
+# an entry reaches another node but its cache lives do not, and `calculateRevalidate` falls back to a 1s
+# default there. Persisting them is what makes cache lives coherent across the cluster.
+#
+# `tags` is deliberately NOT indexed: Harper cannot index array elements, and the `contains` comparator
+# cannot use an index regardless, so an index would cost writes and buy nothing. Tag sweeps scan, which is
+# why broad invalidations are never swept (see sweepInvalidation in src/cacheInvalidation.cts).
 type NextISRCache @table(database: "harperfast_nextjs", table: "nextjs_isr_cache", expiration: 604800) {
 	id: String @primaryKey
 	data: Any
 	tags: [String]
-	lastModified: Long @updatedTime
+	revalidate: Int
+	expire: Int
+	# Set by the background sweep instead of Harper's `invalidate()`, which on a table with no
+	# `sourcedFrom` leaves the record awaiting a refresh that never arrives and blocks every later read.
+	# Recording staleness explicitly keeps the entry servable, which is the point — a miss costs a full
+	# render.
+	invalidatedAt: Long
+	lastModified: Long @updatedTime @indexed
+}
+
+# Entries written by the "use cache" directive. Separate from nextjs_isr_cache because the shapes differ:
+# a use-cache entry is an opaque byte stream with its own timestamp and cache lives, not a structured
+# IncrementalCacheValue keyed off the route.
+type NextUseCache @table(database: "harperfast_nextjs", table: "nextjs_use_cache", expiration: 604800) {
+	# `id` is the STORAGE key: the Next cache key verbatim when it fits, else truncated
+	# with a hash of the full key appended. See toStorageKey() in src/UseCacheHandler.cts —
+	# Next puts no size limit on a cache key and Harper caps a primary key at 1978 bytes.
+	id: String @primaryKey
+	# The untruncated Next cache key, when `id` had to be shortened. Not indexed.
+	cacheKey: String
+	value: Blob
+	tags: [String]
+	timestamp: Long @indexed
+	stale: Int
+	revalidate: Int
+	expire: Int
+	invalidatedAt: Long
 }
 
 type NextCacheInvalidation @table(database: "harperfast_nextjs", table: "nextjs_cache_invalidation", expiration: 604800) {
