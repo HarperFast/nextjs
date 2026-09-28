@@ -1,79 +1,90 @@
 import type { databases as DatabasesType } from 'harper';
 
-/**
- * Next.js prefixes the implicit route/layout tags it attaches to every APP_PAGE and APP_ROUTE entry.
- * A tag like `_N_T_/layout` is carried by every page in the app, so sweeping one would scan and rewrite
- * the entire cache. Those are left to TTL; only explicit user tags are swept.
- */
-export const NEXT_IMPLICIT_TAG_PREFIX = '_N_T_';
-
 const DATABASE = 'harperfast_nextjs';
 const ISR_TABLE = 'nextjs_isr_cache';
 const USE_CACHE_TABLE = 'nextjs_use_cache';
 const INVALIDATION_TABLE = 'nextjs_cache_invalidation';
 
-// Throttling for the background sweep. Chunks bound transaction length — a single long-running
-// transaction is a documented Harper failure mode ("Transaction was open too long") — while the
-// concurrency limit bounds how much of a worker the sweep can take.
-const INVALIDATE_CONCURRENCY = 10;
-const INVALIDATE_CHUNK_SIZE = 100;
-const CHUNK_PAUSE_MAX_MS = 100;
+// Matches the `expiration` of the cache tables in schema.graphql; used when a table does not report its own.
+const DEFAULT_CACHE_TTL_MS = 604_800_000;
 
-// Backpressure: above this many outstanding invalidation rows the sweep is shed. Soft invalidation still
-// covers reads, so shedding costs cache-hit rate, never correctness.
-const MAX_PENDING_INVALIDATIONS = 75_000;
+// Covers an entry that was rendered before an invalidation but stored after it, and replication lag: both
+// let an entry's own TTL start after the invalidation was issued.
+const TOMBSTONE_MARGIN_MS = 3_600_000;
+
+// Chunks bound transaction length — a single long-running transaction is a documented Harper failure
+// mode ("Transaction was open too long") — while the concurrency limits bound how much of a worker a
+// sweep can take.
+const SWEEP_RECORD_CONCURRENCY = 10;
+const SWEEP_CHUNK_SIZE = 100;
+const SWEEP_CHUNK_PAUSE_MAX_MS = 100;
+const SWEEP_TAG_CONCURRENCY = 2;
+const PRUNE_INTERVAL_MS = 300_000;
+const SUBSCRIPTION_RETRY_MIN_MS = 1_000;
+const SUBSCRIPTION_RETRY_MAX_MS = 60_000;
 
 /**
- * The background sweep is off by default. It works — tests cover the throttling, the race guard and the
- * scope limits — but no available primitive marks an entry stale without breaking something else, and
- * every failure mode is silent:
- *
- * - `invalidate()` is a NO-OP. Measured against Harper 5.1.23 and 5.2.0, on a plain table and on a
- *   `sourcedFrom` one: the record reads back unchanged and the source is never re-invoked. A sweep
- *   built on it leaves every entry untouched while still dropping the tombstone, which loses the
- *   invalidation outright — worse than not sweeping.
- * - `delete()` works, but a deleted entry is a miss, and a miss is a full render. Discarding entries
- *   on invalidation is what this design exists to avoid.
- * - `patch()` writing an explicit marker bumps `lastModified` (`@updatedTime`), so the entry looks
- *   *newer* than the invalidation to Next's own `areTagsStale`. Next then treats it as fresh and never
- *   regenerates, serving it stale indefinitely.
- *
- * Marking an entry stale without disturbing the timestamp Next derives staleness from needs a primitive
- * that does not exist yet. Until then the tombstone remains the invalidation, which is the behaviour
- * that shipped previously and is covered by the existing tests; the 7-day expiry bounds table growth on
- * its own, and stale-while-revalidate comes from the tags-manifest mirror at read time rather than from
- * anything the sweep does.
+ * One tag's invalidation, in Next's own terms: `stale` marks entries written before it for background
+ * revalidation, `expired` makes them unusable once it has passed. `at` is when it was issued, and orders
+ * competing views of the same tag. `lapsesAt` is when its tombstone expires.
  */
-const SWEEP_ENABLED = process.env.HARPER_NEXTJS_EXPERIMENTAL_SWEEP === 'true';
+export interface TagInvalidation {
+	stale?: number;
+	expired?: number;
+	at: number;
+	lapsesAt: number;
+}
 
-/** Tag → invalidation timestamp (ms). Shared by every cache handler in the worker. */
-export const cacheInvalidations = new Map<string, number>();
+export type TagState = 'expired' | 'stale' | undefined;
 
-interface CacheRecord {
+interface TombstoneRow {
 	id: string;
+	timestamp?: number;
+	stale?: number;
+	expired?: number;
+	lapsesAt?: number;
+}
+
+interface CacheRow {
+	id: string;
+	tags?: string[];
+	timestamp?: number;
+	lastModified?: number;
 }
 
 interface SweepableTable {
 	search(request: {
 		conditions: Array<{ attribute: string; comparator: string; value: unknown }>;
 		select?: string[];
-	}): AsyncIterable<CacheRecord>;
-	patch(id: string, value: { invalidatedAt: number }): Promise<unknown> | unknown;
+	}): AsyncIterable<CacheRow>;
+	get(id: string): Promise<CacheRow | undefined> | CacheRow | undefined;
+	delete(id: string): Promise<unknown> | unknown;
+	expirationMS?: number;
 }
 
 interface InvalidationTable {
-	put(key: string, value: { timestamp: number }): Promise<unknown> | unknown;
-	delete(key: string): Promise<unknown> | unknown;
-	getRecordCount?(): Promise<{ recordCount: number }>;
+	put(id: string, value: Omit<TombstoneRow, 'id'>, context?: { expiresAt?: number }): Promise<unknown> | unknown;
+	search(): AsyncIterable<TombstoneRow>;
+	subscribe(request: { omitCurrent?: boolean }): Promise<{
+		on(event: string, listener: (event: { type: string; id: string; value?: Omit<TombstoneRow, 'id'> }) => void): void;
+	}>;
 }
 
 export interface InvalidationDeps {
 	databases?: typeof DatabasesType;
 	sleep?: (ms: number) => Promise<void>;
-	logger?: { info(...args: unknown[]): void; error(...args: unknown[]): void };
-	/** Runs the background sweep. Defaults to fire-and-forget; tests substitute a collector. */
+	logger?: { info?(...args: unknown[]): void; error(...args: unknown[]): void };
+	/** Runs a sweep. Defaults to the worker's sweep queue; tests substitute a collector. */
 	scheduleSweep?: (task: () => Promise<void>) => void;
+	/** Stand-in for Next's tags-manifest module; `null` means Next has none. */
+	tagsManifestModule?: unknown;
+	/** False skips the periodic prune timer. */
+	maintenance?: boolean;
+	now?: () => number;
 }
+
+/** Tag → its newest invalidation. Shared by both cache handlers in the worker. */
+export const cacheInvalidations = new Map<string, TagInvalidation>();
 
 /**
  * `databases` is a Harper-provided global, read lazily so that loading this module from a non-Harper
@@ -83,8 +94,17 @@ function getDatabases(deps: InvalidationDeps): typeof DatabasesType | undefined 
 	return deps.databases ?? (globalThis as { databases?: typeof DatabasesType }).databases;
 }
 
-function getLogger(deps: InvalidationDeps) {
+function getScope(deps: InvalidationDeps): Record<string, unknown> | undefined {
+	const databases = getDatabases(deps);
+	return databases ? (databases as unknown as Record<string, Record<string, unknown>>)[DATABASE] : undefined;
+}
+
+function getLogger(deps: InvalidationDeps): NonNullable<InvalidationDeps['logger']> {
 	return deps.logger ?? (globalThis as { logger?: InvalidationDeps['logger'] }).logger ?? console;
+}
+
+function nowFor(deps: InvalidationDeps): number {
+	return deps.now ? deps.now() : Date.now();
 }
 
 function defaultSleep(ms: number): Promise<void> {
@@ -118,269 +138,465 @@ export async function runWithConcurrency<T>(
 	await Promise.all(workers);
 }
 
-/** Only explicit user tags are swept; see NEXT_IMPLICIT_TAG_PREFIX. */
-export function isSweepableTag(tag: string): boolean {
-
-	return !tag.startsWith(NEXT_IMPLICIT_TAG_PREFIX);
-}
+let unboundedCacheReported = false;
 
 /**
- * `markedInvalidAt` is the record's own `invalidatedAt`, written by the sweep. It has to be consulted
- * separately because the sweep's write bumps `lastModified`, which would otherwise make the tag
- * timestamps below stop matching — and because the tombstone is dropped once the sweep finishes, so
- * after that the record's own marker is the only remaining evidence.
+ * How long a tombstone must live: past the last moment any entry written before the invalidation can
+ * still be read. Harper caps every record at its table's `expiration`, counted from its last write, so
+ * that bound is the longer of the two cache tables' TTLs plus the margin.
  */
-export function isInvalidated(
-	recordTags: string[],
-	lastModified: number,
-	revalidatedTags: string[],
-	ctxTags: string[],
-	markedInvalidAt?: number
-): boolean {
-	if (typeof markedInvalidAt === 'number' && markedInvalidAt > 0) return true;
-
-	const allTags = recordTags.length > 0 ? recordTags : ctxTags;
-	for (const tag of allTags) {
-		if (revalidatedTags.includes(tag)) return true;
-		const invalidatedAt = cacheInvalidations.get(tag);
-		if (invalidatedAt !== undefined && invalidatedAt > lastModified) return true;
+export function tombstoneLifetimeMs(deps: InvalidationDeps = {}): number {
+	const scope = getScope(deps);
+	let longest = 0;
+	for (const name of [ISR_TABLE, USE_CACHE_TABLE]) {
+		const ttl = (scope?.[name] as { expirationMS?: number } | undefined)?.expirationMS;
+		if (ttl === undefined) {
+			longest = Math.max(longest, DEFAULT_CACHE_TTL_MS);
+		} else if (ttl > 0) {
+			longest = Math.max(longest, ttl);
+		} else if (!unboundedCacheReported) {
+			unboundedCacheReported = true;
+			getLogger(deps).error(
+				`[CacheHandler] ${DATABASE}.${name} has no expiration, so its entries can outlive any invalidation tombstone; invalidated entries may be served again once a tombstone lapses`
+			);
+		}
 	}
-	return false;
+	return (longest || DEFAULT_CACHE_TTL_MS) + TOMBSTONE_MARGIN_MS;
 }
 
 /**
- * Mirror an invalidation into Next's own tags manifest so Next classifies affected APP_PAGE/APP_ROUTE
- * entries as *stale* (serve the cached response, regenerate in the background) rather than missing.
- * Without this the handler's only way to signal invalidation is returning null, which Next reads as a
- * miss and turns into a blocking render — the behaviour we specifically want to avoid under load.
+ * Next 16 `updateTags` semantics: with durations a tag goes stale now and expires `durations.expire`
+ * seconds later; without, it expires now.
  */
-function mirrorToNextTagsManifest(tags: string[], timestamp: number, deps: InvalidationDeps): void {
+export function invalidationFor(
+	now: number,
+	durations: { expire?: number } | undefined,
+	lifetimeMs: number
+): TagInvalidation {
+	const lapsesAt = now + lifetimeMs;
+	if (!durations) return { expired: now, at: now, lapsesAt };
+	return {
+		stale: now,
+		expired: durations.expire !== undefined ? now + durations.expire * 1000 : undefined,
+		at: now,
+		lapsesAt,
+	};
+}
+
+/**
+ * Rows written before `stale`/`expired` existed carry only `timestamp`, which meant "expired then". The
+ * previous plugin wrote a deferred invalidation as `now + expire`, so a legacy timestamp can be in the
+ * future; it was issued no later than now, and ordering it by that future time would make it outrank
+ * every invalidation of the tag issued after it.
+ */
+export function tombstoneToInvalidation(
+	row: Omit<TombstoneRow, 'id'> | undefined,
+	now: number = Date.now()
+): TagInvalidation | undefined {
+	if (typeof row?.timestamp !== 'number') return undefined;
+	const legacy = row.stale == undefined && row.expired == undefined;
+	return {
+		stale: row.stale ?? undefined,
+		expired: legacy ? row.timestamp : (row.expired ?? undefined),
+		at: legacy ? Math.min(row.timestamp, now) : row.timestamp,
+		lapsesAt: row.lapsesAt ?? row.timestamp + DEFAULT_CACHE_TTL_MS,
+	};
+}
+
+/** True when the invalidation expires entries immediately rather than marking them stale first. */
+export function isHardExpiry(invalidation: TagInvalidation): boolean {
+	return invalidation.expired !== undefined && invalidation.expired <= invalidation.at;
+}
+
+/** The state of an entry written at `writtenAt`, given the invalidations of its tags this worker knows. */
+export function tagState(tags: Iterable<string>, writtenAt: number, now: number = Date.now()): TagState {
+	let state: TagState;
+	for (const tag of tags) {
+		const invalidation = cacheInvalidations.get(tag);
+		if (!invalidation) continue;
+		const { stale, expired } = invalidation;
+		if (expired !== undefined && expired <= now && expired > writtenAt) return 'expired';
+		if (stale !== undefined && stale > writtenAt) state = 'stale';
+	}
+	return state;
+}
+
+/**
+ * Newest expiration among `tags` that has already passed. An expiration still in the future is not yet
+ * an expiration: reporting it would make Next discard every entry created before it, including ones
+ * regenerated after the invalidation.
+ */
+export function passedExpiration(tags: Iterable<string>, now: number = Date.now()): number {
+	let newest = 0;
+	for (const tag of tags) {
+		const expired = cacheInvalidations.get(tag)?.expired;
+		if (expired !== undefined && expired <= now && expired > newest) newest = expired;
+	}
+	return newest;
+}
+
+type TagsManifest =
+	| { kind: 'none' }
+	| { kind: 'entries'; manifest: Map<string, { stale?: number; expired?: number } | undefined> }
+	| { kind: 'timestamps'; manifest: Map<string, number | undefined> };
+
+let loadedTagsManifest: TagsManifest | undefined;
+
+/**
+ * Next 16 keys `{stale, expired}` per tag; Next 15 keys a single revalidation timestamp; Next 14 has no
+ * such module. Writing the wrong shape either throws (a property set on a number, in strict mode) or
+ * poisons Next's own reads (`Math.max` over an object is NaN).
+ */
+function getTagsManifest(deps: InvalidationDeps): TagsManifest | undefined {
+	if (deps.tagsManifestModule !== undefined) return classifyTagsManifest(deps.tagsManifestModule);
+	if (loadedTagsManifest) return loadedTagsManifest;
 	try {
 		// eslint-disable-next-line @typescript-eslint/no-require-imports
-		const { tagsManifest } = require('next/dist/server/lib/incremental-cache/tags-manifest.external.js') as {
-			tagsManifest: Map<string, { stale?: number; expired?: number }>;
-		};
-		for (const tag of tags) {
-			const entry = tagsManifest.get(tag) ?? {};
-			entry.stale = timestamp;
-			tagsManifest.set(tag, entry);
-		}
+		loadedTagsManifest = classifyTagsManifest(require('next/dist/server/lib/incremental-cache/tags-manifest.external.js'));
 	} catch (error) {
-		// Next 14 has no tags-manifest.external.js. Without this the legacy handler logs an error on
-		// EVERY invalidation there, which is noise rather than a fault.
-		if ((error as { code?: string } | undefined)?.code === 'MODULE_NOT_FOUND') return;
-		getLogger(deps).error('[CacheHandler] could not mirror invalidation into the Next tags manifest', error);
+		if ((error as { code?: string } | undefined)?.code !== 'MODULE_NOT_FOUND') {
+			getLogger(deps).error('[CacheHandler] could not load the Next tags manifest', error);
+			return undefined;
+		}
+		loadedTagsManifest = { kind: 'none' };
+	}
+	return loadedTagsManifest;
+}
+
+function classifyTagsManifest(module: unknown): TagsManifest {
+	const exports = module as { tagsManifest?: unknown; areTagsStale?: unknown } | null;
+	if (!(exports?.tagsManifest instanceof Map)) return { kind: 'none' };
+	return typeof exports.areTagsStale === 'function'
+		? { kind: 'entries', manifest: exports.tagsManifest }
+		: { kind: 'timestamps', manifest: exports.tagsManifest };
+}
+
+/** True when Next itself serves tag-stale ISR entries stale-while-revalidate from its manifest (Next 16). */
+export function nextServesStaleTags(deps: InvalidationDeps = {}): boolean {
+	return getTagsManifest(deps)?.kind === 'entries';
+}
+
+/**
+ * Mirror an invalidation into Next's own tags manifest, so Next's in-process checks agree with this
+ * worker's view — including for an invalidation that arrived from another worker or node. `undefined`
+ * withdraws one, but only if the manifest still holds what was mirrored: Next may have written the tag
+ * itself since.
+ */
+function mirrorToTagsManifest(
+	tag: string,
+	invalidation: TagInvalidation | undefined,
+	previous: TagInvalidation | undefined,
+	deps: InvalidationDeps
+): void {
+	const tagsManifest = getTagsManifest(deps);
+	if (!tagsManifest || tagsManifest.kind === 'none') return;
+	if (tagsManifest.kind === 'timestamps') {
+		const existing = tagsManifest.manifest.get(tag);
+		if (!invalidation) {
+			if (previous && existing === revalidatedAtOf(previous)) tagsManifest.manifest.delete(tag);
+			return;
+		}
+		const revalidatedAt = revalidatedAtOf(invalidation);
+		if (typeof existing !== 'number' || existing < revalidatedAt) tagsManifest.manifest.set(tag, revalidatedAt);
+		return;
+	}
+	const existing = tagsManifest.manifest.get(tag);
+	if (!invalidation) {
+		if (previous && existing?.stale === previous.stale && existing?.expired === previous.expired) {
+			tagsManifest.manifest.delete(tag);
+		}
+		return;
+	}
+	tagsManifest.manifest.set(tag, {
+		...(existing && typeof existing === 'object' ? existing : {}),
+		...(invalidation.stale !== undefined ? { stale: invalidation.stale } : {}),
+		...(invalidation.expired !== undefined ? { expired: invalidation.expired } : {}),
+	});
+}
+
+function revalidatedAtOf(invalidation: TagInvalidation): number {
+	return invalidation.expired ?? invalidation.stale ?? invalidation.at;
+}
+
+/**
+ * Adopt an invalidation into this worker's view. The newest (by `at`) wins, so the subscription, the
+ * start-up hydration and this worker's own writes can arrive in any order.
+ */
+export function noteInvalidation(tag: string, invalidation: TagInvalidation, deps: InvalidationDeps = {}): void {
+	const existing = cacheInvalidations.get(tag);
+	if (existing && existing.at > invalidation.at) return;
+	if (invalidation.lapsesAt <= nowFor(deps)) return;
+	cacheInvalidations.set(tag, invalidation);
+	mirrorToTagsManifest(tag, invalidation, existing, deps);
+}
+
+function forgetInvalidation(tag: string, deps: InvalidationDeps): void {
+	const existing = cacheInvalidations.get(tag);
+	if (!existing) return;
+	cacheInvalidations.delete(tag);
+	mirrorToTagsManifest(tag, undefined, existing, deps);
+}
+
+/** Drop invalidations whose tombstone has lapsed. TTL eviction does not emit a delete event. */
+export function pruneInvalidations(deps: InvalidationDeps = {}): void {
+	const now = nowFor(deps);
+	for (const [tag, invalidation] of cacheInvalidations) {
+		if (invalidation.lapsesAt <= now) forgetInvalidation(tag, deps);
 	}
 }
 
-let subscriptionInitialized = false;
-
-interface SubscribableTable {
-	search(): AsyncIterable<{ id: string; timestamp: number }>;
-	subscribe(request: { omitCurrent?: boolean }): Promise<{
-		on(event: string, listener: (event: { type: string; id: string; value?: { timestamp: number } }) => void): void;
-	}>;
-}
-
 /**
- * Hydrate the invalidation map from storage, then track it via a Harper subscription so an invalidation
- * issued on any worker or node is observed here within milliseconds.
- *
- * This is why `refreshTags()` on the "use cache" handler is a no-op: the framework expects handlers to
- * poll a tags service, and Harper pushes instead.
- */
-/**
- * Rebuild the in-memory invalidation map from the tombstone table.
- *
- * This is what makes an invalidation survive the process holding it. The map is worker-local, so a
- * worker that dies between `revalidateTag` and the entry being regenerated would otherwise come back
- * with no record of the invalidation and start serving the stale entry as though it were fresh. The
- * tombstone is the durable half of that pair, and this is the half that reads it back.
+ * Rebuild the in-memory invalidation map from the tombstone table, so a worker that restarts between
+ * `revalidateTag` and the entry's regeneration still knows the entry is invalid.
  */
 export async function hydrateInvalidations(
-	table: Pick<SubscribableTable, 'search'>,
+	table: Pick<InvalidationTable, 'search'>,
 	deps: InvalidationDeps = {}
 ): Promise<void> {
 	for await (const row of table.search()) {
-		cacheInvalidations.set(row.id, row.timestamp);
-		mirrorToNextTagsManifest([row.id], row.timestamp, deps);
+		const invalidation = tombstoneToInvalidation(row, nowFor(deps));
+		if (invalidation) noteInvalidation(row.id, invalidation, deps);
 	}
 }
 
-export async function initializeInvalidationSubscription(deps: InvalidationDeps = {}): Promise<void> {
-	if (subscriptionInitialized) return;
-	const databases = getDatabases(deps);
-	if (!databases) return;
-	subscriptionInitialized = true;
+let subscription: Awaited<ReturnType<InvalidationTable['subscribe']>> | undefined;
+let initialization: Promise<void> | undefined;
+let initialized = false;
+let subscriptionRetryAt = 0;
+let subscriptionRetryMs = SUBSCRIPTION_RETRY_MIN_MS;
+let pruneTimerStarted = false;
 
-	const scope = (databases as unknown as Record<string, Record<string, unknown>>)[DATABASE];
-	// Harper's TypeScript types require RequestTarget/SubscriptionRequest objects, but the runtime
-	// accepts plain object literals (and search() accepts no args).
-	const table = scope?.[INVALIDATION_TABLE] as unknown as SubscribableTable | undefined;
-	if (!table) {
-		subscriptionInitialized = false;
+function onTombstoneEvent(
+	event: { type: string; id: string; value?: Omit<TombstoneRow, 'id'> },
+	deps: InvalidationDeps
+): void {
+	if (!event.id) return;
+	if (event.type === 'delete') {
+		forgetInvalidation(event.id, deps);
 		return;
 	}
+	const invalidation = tombstoneToInvalidation(event.value, nowFor(deps));
+	if (invalidation) noteInvalidation(event.id, invalidation, deps);
+}
 
-	try {
-		await hydrateInvalidations(table, deps);
+function startPruneTimer(deps: InvalidationDeps): void {
+	if (pruneTimerStarted || deps.maintenance === false) return;
+	pruneTimerStarted = true;
+	setInterval(() => pruneInvalidations(deps), PRUNE_INTERVAL_MS).unref();
+}
 
-		const subscription = await table.subscribe({ omitCurrent: true });
+/**
+ * Subscribe to tombstones, then hydrate from storage. Subscribing first means an invalidation written
+ * while the hydration scan runs is still observed; `noteInvalidation` makes the overlap harmless.
+ * Concurrent callers share one attempt, and a failure backs off rather than retrying on every request.
+ */
+export function initializeInvalidationSubscription(deps: InvalidationDeps = {}): Promise<void> {
+	if (initialized) return Promise.resolve();
+	if (initialization) return initialization;
+	if (nowFor(deps) < subscriptionRetryAt) return Promise.resolve();
+	const table = getScope(deps)?.[INVALIDATION_TABLE] as InvalidationTable | undefined;
+	if (!table) return Promise.resolve();
 
-		subscription.on('data', (event) => {
-			if (!event.id) return;
-			if (event.type === 'delete') {
-				// The sweep has finished for this tag, so the tombstone is no longer load-bearing.
-				cacheInvalidations.delete(event.id);
-			} else if (event.type === 'put' && event.value) {
-				cacheInvalidations.set(event.id, event.value.timestamp);
-				// Mirror here too, so an invalidation issued on another node still yields stale-serving
-				// rather than a blocking miss on this one.
-				mirrorToNextTagsManifest([event.id], event.value.timestamp, deps);
+	initialization = (async () => {
+		try {
+			if (!subscription) {
+				// Harper's TypeScript types require a SubscriptionRequest, but the runtime accepts a plain literal.
+				subscription = await table.subscribe({ omitCurrent: true });
+				subscription.on('data', (event) => onTombstoneEvent(event, deps));
+				subscription.on('error', (error) => {
+					getLogger(deps).error('[CacheHandler] invalidation subscription error', error);
+				});
 			}
-		});
-
-		subscription.on('error', (error) => {
-			getLogger(deps).error('[CacheHandler] invalidation subscription error', error);
-		});
-	} catch (error) {
-		// Reset so a future construction can retry — failure here means we lose cross-worker visibility,
-		// but the cache still works (just falls back to per-request revalidatedTags).
-		subscriptionInitialized = false;
-		getLogger(deps).error('[CacheHandler] failed to initialize invalidation subscription', error);
-	}
-}
-
-/** Update this worker's view of an invalidation without touching storage. */
-export function noteInvalidation(tags: string[], timestamp: number, deps: InvalidationDeps = {}): void {
-	for (const tag of tags) {
-		cacheInvalidations.set(tag, timestamp);
-	}
-	mirrorToNextTagsManifest(tags, timestamp, deps);
-}
-
-async function sweepTable(
-	table: SweepableTable,
-	timeAttribute: string,
-	tag: string,
-	timestamp: number,
-	deps: InvalidationDeps
-): Promise<number> {
-	const sleep = deps.sleep ?? defaultSleep;
-
-	// The time condition is the race guard: a record written after the invalidation was issued is
-	// semantically fresh, so the sweep must leave it alone.
-	const matches = table.search({
-		conditions: [
-			{ attribute: 'tags', comparator: 'contains', value: tag },
-			{ attribute: timeAttribute, comparator: 'less_than', value: timestamp },
-		],
-		select: ['id'],
-	});
-
-	const ids: string[] = [];
-	for await (const record of matches) {
-		ids.push(record.id);
-	}
-
-	const batches = chunk(ids, INVALIDATE_CHUNK_SIZE);
-	for (let index = 0; index < batches.length; index++) {
-		await runWithConcurrency(batches[index], INVALIDATE_CONCURRENCY, async (id) => {
-			await table.patch(id, { invalidatedAt: timestamp });
-		});
-		if (index < batches.length - 1) {
-			await sleep(jitter(CHUNK_PAUSE_MAX_MS));
+			await hydrateInvalidations(table, deps);
+			startPruneTimer(deps);
+			initialized = true;
+			subscriptionRetryMs = SUBSCRIPTION_RETRY_MIN_MS;
+		} catch (error) {
+			subscriptionRetryAt = nowFor(deps) + subscriptionRetryMs;
+			subscriptionRetryMs = Math.min(subscriptionRetryMs * 2, SUBSCRIPTION_RETRY_MAX_MS);
+			getLogger(deps).error('[CacheHandler] failed to initialize invalidation subscription', error);
+		} finally {
+			initialization = undefined;
 		}
-	}
+	})();
+	return initialization;
+}
 
-	return ids.length;
+/** Test hook: stand in for Next's tags-manifest module; `null` simulates Next 14, which has none. */
+export function useTagsManifestModuleForTesting(module: unknown): void {
+	loadedTagsManifest = classifyTagsManifest(module);
+}
+
+/** Test hook: forget state held at module level. */
+export function resetInvalidationStateForTesting(): void {
+	cacheInvalidations.clear();
+	subscription = undefined;
+	initialization = undefined;
+	initialized = false;
+	subscriptionRetryAt = 0;
+	subscriptionRetryMs = SUBSCRIPTION_RETRY_MIN_MS;
+	loadedTagsManifest = undefined;
+	unboundedCacheReported = false;
+	queuedSweeps.clear();
+	activeSweeps = 0;
+	recordedThisTurn.clear();
+}
+
+function writtenAtOf(row: CacheRow): number {
+	return row.timestamp ?? row.lastModified ?? 0;
 }
 
 /**
- * Invalidate every cached entry carrying `tag` that predates `timestamp`, then drop the invalidation row
- * so the subscription clears it from every worker's map. Entries are invalidated, never deleted, so Next
- * can still serve them stale while regenerating.
- *
- * The invalidation row is removed only on success: while it remains, soft invalidation keeps reads
- * correct, so a failed sweep degrades to the pre-sweep behaviour rather than losing the invalidation.
+ * Delete every record in `table` carrying `tag` that was written before `expiredAt`. Reads already treat
+ * those entries as misses while the tombstone lives; deleting them commits that permanently and returns
+ * the space. A regeneration racing the sweep can at worst lose its fresh entry, costing one render.
  */
-export async function sweepTag(tag: string, timestamp: number, deps: InvalidationDeps = {}): Promise<void> {
-	const databases = getDatabases(deps);
-	if (!databases) return;
+function isIndexRebuilding(error: unknown): boolean {
+	return (error as { name?: string } | undefined)?.name === 'IndexRebuildingError';
+}
 
-	const scope = (databases as unknown as Record<string, Record<string, unknown>>)[DATABASE];
+/**
+ * The records carrying `tag`, through the `tags` index. While Harper reports that index as rebuilding it
+ * refuses the lookup, so fall back to scanning with the same exact-element match. Harper 5.2.0 can leave
+ * that report stuck on every worker thread but the one that ran the rebuild until they restart, so the
+ * fallback is not just a brief upgrade window.
+ */
+async function* rowsTagged(table: SweepableTable, tag: string): AsyncIterable<CacheRow> {
+	const select = ['id', 'tags', 'timestamp', 'lastModified'];
+	try {
+		yield* table.search({ conditions: [{ attribute: 'tags', comparator: 'equals', value: tag }], select });
+		return;
+	} catch (error) {
+		if (!isIndexRebuilding(error)) throw error;
+	}
+	for await (const row of table.search({ conditions: [], select })) {
+		if (row.tags?.includes(tag)) yield row;
+	}
+}
+
+async function sweepTable(table: SweepableTable, tag: string, expiredAt: number, deps: InvalidationDeps): Promise<number> {
+	const sleep = deps.sleep ?? defaultSleep;
+	const ids: string[] = [];
+	for await (const row of rowsTagged(table, tag)) {
+		if (writtenAtOf(row) < expiredAt) ids.push(row.id);
+	}
+
+	let deleted = 0;
+	const batches = chunk(ids, SWEEP_CHUNK_SIZE);
+	for (let index = 0; index < batches.length; index++) {
+		await runWithConcurrency(batches[index], SWEEP_RECORD_CONCURRENCY, async (id) => {
+			// Re-read so an entry regenerated since the search survives.
+			const current = await table.get(id);
+			if (!current || writtenAtOf(current) >= expiredAt) return;
+			await table.delete(id);
+			deleted++;
+		});
+		if (index < batches.length - 1) await sleep(jitter(SWEEP_CHUNK_PAUSE_MAX_MS));
+	}
+	return deleted;
+}
+
+/**
+ * Delete the entries a hard expiry of `tag` made unusable. Only reclaims space: correctness rests on the
+ * tombstone, so a failed or skipped sweep leaves reads unaffected.
+ */
+export async function sweepTag(tag: string, expiredAt: number, deps: InvalidationDeps = {}): Promise<void> {
+	const scope = getScope(deps);
 	if (!scope) return;
+	const isrCount = await sweepTable(scope[ISR_TABLE] as SweepableTable, tag, expiredAt, deps);
+	const useCacheCount = await sweepTable(scope[USE_CACHE_TABLE] as SweepableTable, tag, expiredAt, deps);
+	getLogger(deps).info?.(
+		`[CacheHandler] deleted ${isrCount + useCacheCount} entries expired by "${tag}" (isr=${isrCount}, useCache=${useCacheCount})`
+	);
+}
 
-	const logger = getLogger(deps);
+const queuedSweeps = new Map<string, number>();
+let activeSweeps = 0;
 
-	try {
-		const isrCount = await sweepTable(scope[ISR_TABLE] as SweepableTable, 'lastModified', tag, timestamp, deps);
-		const useCacheCount = await sweepTable(scope[USE_CACHE_TABLE] as SweepableTable, 'timestamp', tag, timestamp, deps);
-
-		logger.info(
-			`[CacheHandler] invalidated ${isrCount + useCacheCount} entries for "${tag}" (isr=${isrCount}, useCache=${useCacheCount})`
-		);
-
-		await (scope[INVALIDATION_TABLE] as InvalidationTable).delete(tag);
-	} catch (error) {
-		logger.error(`[CacheHandler] sweep failed for "${tag}"; soft invalidation remains in effect`, error);
+function drainSweeps(deps: InvalidationDeps): void {
+	while (activeSweeps < SWEEP_TAG_CONCURRENCY && queuedSweeps.size > 0) {
+		const [tag, expiredAt] = queuedSweeps.entries().next().value as [string, number];
+		queuedSweeps.delete(tag);
+		activeSweeps++;
+		void sweepTag(tag, expiredAt, deps)
+			.catch((error) => {
+				getLogger(deps).error(`[CacheHandler] sweep failed for "${tag}"; entries are left to their TTL`, error);
+			})
+			.finally(() => {
+				activeSweeps--;
+				drainSweeps(deps);
+			});
 	}
 }
 
-async function isOverAdmissionThreshold(table: InvalidationTable, deps: InvalidationDeps): Promise<boolean> {
-	if (typeof table.getRecordCount !== 'function') return false;
-	try {
-		const { recordCount } = await table.getRecordCount();
-		return recordCount > MAX_PENDING_INVALIDATIONS;
-	} catch (error) {
-		getLogger(deps).error('[CacheHandler] could not read invalidation record count', error);
-		return false;
+function scheduleSweep(tag: string, expiredAt: number, deps: InvalidationDeps): void {
+	if (deps.scheduleSweep) {
+		deps.scheduleSweep(() => sweepTag(tag, expiredAt, deps));
+		return;
 	}
+	queuedSweeps.set(tag, Math.max(queuedSweeps.get(tag) ?? 0, expiredAt));
+	drainSweeps(deps);
 }
 
 /**
- * Record a tag invalidation: update this worker immediately, persist a row for every other worker and
- * node, then schedule the background sweep. The caller is never blocked on the sweep.
+ * Record a tag invalidation: adopt it on this worker immediately, then persist a tombstone for every
+ * other worker and node that lives as long as any entry it invalidates can. A hard expiry is also swept
+ * onto the entries. The caller is never blocked on the sweep.
  */
+// A single `revalidateTag` reaches both handlers: Next calls the "use cache" handler's `updateTags` and
+// the incremental cache's `revalidateTag` in the same turn. Both land here with the same tags and
+// durations, so the second is dropped rather than writing every tombstone and running every sweep twice.
+const recordedThisTurn = new Set<string>();
+
+function claimForThisTurn(tag: string, durations: { expire?: number } | undefined): boolean {
+	const key = `${tag}\u0000${durations ? (durations.expire ?? 'stale') : 'expired'}`;
+	if (recordedThisTurn.has(key)) return false;
+	if (recordedThisTurn.size === 0) setImmediate(() => recordedThisTurn.clear());
+	recordedThisTurn.add(key);
+	return true;
+}
+
 export async function recordInvalidation(
 	tags: string[],
 	durations: { expire?: number } | undefined,
 	deps: InvalidationDeps = {}
 ): Promise<void> {
-	// Deduplicate before anything else: duplicates cost a redundant put each, and — more expensively —
-	// schedule a duplicate sweep, which scans because tags cannot be indexed.
-	const uniqueTags = Array.from(new Set(tags));
+	// Duplicates would each cost a redundant tombstone write and a redundant sweep.
+	const uniqueTags = Array.from(new Set(tags)).filter((tag) => claimForThisTurn(tag, durations));
 	if (uniqueTags.length === 0) return;
 
-	const databases = getDatabases(deps);
-	if (!databases) return;
-
-	const scope = (databases as unknown as Record<string, Record<string, unknown>>)[DATABASE];
+	const scope = getScope(deps);
 	if (!scope) return;
+	const tombstones = scope[INVALIDATION_TABLE] as InvalidationTable;
 
-	const invalidationTable = scope[INVALIDATION_TABLE] as InvalidationTable;
+	const now = nowFor(deps);
+	const issued = invalidationFor(now, durations, tombstoneLifetimeMs(deps));
 
-	// `durations.expire` defers the invalidation: Next uses it to expire a tag at a future point rather
-	// than immediately.
-	const timestamp = Date.now() + (durations?.expire !== undefined ? durations.expire * 1000 : 0);
+	const merged = uniqueTags.map((tag) => {
+		// Like Next's own `{...existing, stale, expired}`: a later invalidation keeps the parts of an
+		// earlier one it does not replace.
+		const existing = cacheInvalidations.get(tag);
+		const invalidation: TagInvalidation = {
+			...issued,
+			stale: issued.stale ?? existing?.stale,
+			expired: issued.expired ?? existing?.expired,
+		};
+		noteInvalidation(tag, invalidation, deps);
+		return { tag, invalidation };
+	});
 
-	noteInvalidation(uniqueTags, timestamp, deps);
+	await Promise.all(
+		merged.map(({ tag, invalidation }) =>
+			tombstones.put(
+				tag,
+				{ timestamp: now, stale: invalidation.stale, expired: invalidation.expired, lapsesAt: invalidation.lapsesAt },
+				// Outlives the table's own expiration, which only bounds the entries, not their tombstones.
+				{ expiresAt: invalidation.lapsesAt }
+			)
+		)
+	);
 
-	await Promise.all(uniqueTags.map((tag) => invalidationTable.put(tag, { timestamp })));
-
-	if (await isOverAdmissionThreshold(invalidationTable, deps)) {
-		getLogger(deps).error(
-			`[CacheHandler] ${MAX_PENDING_INVALIDATIONS}+ pending invalidations; shedding sweep for ${uniqueTags.length} tag(s)`
-		);
-		return;
-	}
-
-	// `deps.scheduleSweep` is how the tests drive the sweep regardless of the default.
-	if (!SWEEP_ENABLED && !deps.scheduleSweep) return;
-
-	const schedule = deps.scheduleSweep ?? ((task: () => Promise<void>) => void task());
-	for (const tag of uniqueTags) {
-		if (!isSweepableTag(tag)) continue;
-		schedule(() => sweepTag(tag, timestamp, deps));
+	if (isHardExpiry(issued)) {
+		for (const tag of uniqueTags) scheduleSweep(tag, issued.expired as number, deps);
 	}
 }

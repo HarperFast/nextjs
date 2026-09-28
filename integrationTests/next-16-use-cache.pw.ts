@@ -64,7 +64,28 @@ test('every worker serves the same cached value', async ({ page, harper }) => {
 	expect(seen.size, `expected one shared value, saw ${[...seen].join(', ')}`).toBe(1);
 });
 
-test('the entry survives a revalidateTag as stale rather than disappearing', async ({ page, request, harper }) => {
+async function searchTombstone(request: any, harper: any, tag: string) {
+	const response = await request.post(harper.operationsAPIURL, {
+		headers: { 'Content-Type': 'application/json', Authorization: authHeader(harper) },
+		data: {
+			operation: 'search_by_value',
+			database: DATABASE,
+			table: 'nextjs_cache_invalidation',
+			search_attribute: 'id',
+			search_value: tag,
+			get_attributes: ['id', 'timestamp', 'stale', 'expired', 'lapsesAt', '$expiresAt'],
+		},
+	});
+	expect(response.status()).toBe(200);
+	const [row] = await response.json();
+	return row as { timestamp: number; stale?: number; expired?: number; lapsesAt: number; $expiresAt?: number } | undefined;
+}
+
+const WEEK_MS = 604_800_000;
+
+// revalidateTag(tag) with no profile expires the tag immediately in Next 16: the old entry is unusable,
+// so it is regenerated on the next read and swept out of storage.
+test('revalidateTag expires the entry, and the sweep deletes it', async ({ page, request, harper }) => {
 	const url = `${harper.httpURL}/cached`;
 
 	await page.goto(url);
@@ -73,25 +94,67 @@ test('the entry survives a revalidateTag as stale rather than disappearing', asy
 	const revalidated = await request.post(`${harper.httpURL}/api/revalidate?tag=use-cache-tag`);
 	expect(revalidated.status()).toBe(200);
 
-	// An invalidation row is written for the tag.
-	const invalidations = await request.post(harper.operationsAPIURL, {
-		headers: { 'Content-Type': 'application/json', Authorization: authHeader(harper) },
-		data: {
-			operation: 'search_by_value',
-			database: DATABASE,
-			table: 'nextjs_cache_invalidation',
-			search_attribute: 'id',
-			search_value: 'use-cache-tag',
-			get_attributes: ['id', 'timestamp'],
-		},
-	});
-	expect(await invalidations.json()).toHaveLength(1);
+	const tombstone = await searchTombstone(request, harper, 'use-cache-tag');
+	expect(tombstone, 'no tombstone was written').toBeTruthy();
+	expect(tombstone!.expired).toBe(tombstone!.timestamp);
+	// It must outlive every entry it invalidates: those live at most the table's 7 days from their last write.
+	expect(tombstone!.lapsesAt).toBeGreaterThan(tombstone!.timestamp + WEEK_MS);
+	// Harper's own expiry for the row, which is what actually evicts it — not the table's 7-day default.
+	expect(tombstone!.$expiresAt).toBe(tombstone!.lapsesAt);
 
-	// The content regenerates rather than being served stale forever.
 	await expect(async () => {
 		await page.goto(url);
 		expect(await page.getByTestId('nonce').innerText()).not.toBe(before);
 	}).toPass({ timeout: 15_000 });
+
+	await expect(async () => {
+		const rows = await searchUseCache(request, harper);
+		const predating = rows.filter(
+			(row: { tags?: string[]; timestamp: number }) =>
+				row.tags?.includes('use-cache-tag') && row.timestamp < tombstone!.timestamp
+		);
+		expect(predating, 'the sweep left an expired entry in storage').toHaveLength(0);
+	}).toPass({ timeout: 15_000 });
+});
+
+// revalidateTag(tag, 'max') marks the tag stale now and expires it a year out. The entry keeps being
+// served while it regenerates in the background, and the regenerated one is fresh — not stale or
+// missing for the whole year, which is what storing the expiry as the stale time used to cause.
+test('revalidateTag with a profile serves the entry stale, then regenerates it once', async ({
+	page,
+	request,
+	harper,
+}) => {
+	const url = `${harper.httpURL}/cached`;
+
+	await page.goto(url);
+	const before = await page.getByTestId('nonce').innerText();
+	await page.goto(url);
+	expect(await page.getByTestId('nonce').innerText()).toBe(before);
+
+	const revalidated = await request.post(`${harper.httpURL}/api/revalidate?tag=use-cache-tag&profile=max`);
+	expect(revalidated.status()).toBe(200);
+
+	const tombstone = await searchTombstone(request, harper, 'use-cache-tag');
+	expect(tombstone!.stale).toBe(tombstone!.timestamp);
+	expect(tombstone!.expired).toBeGreaterThan(tombstone!.timestamp + 300 * 24 * 3600 * 1000);
+
+	// Stale, not expired: the first read is still served the old value rather than blocking on a render.
+	await page.goto(url);
+	expect(await page.getByTestId('nonce').innerText()).toBe(before);
+
+	let regenerated = '';
+	await expect(async () => {
+		await page.goto(url);
+		regenerated = await page.getByTestId('nonce').innerText();
+		expect(regenerated).not.toBe(before);
+	}).toPass({ timeout: 15_000 });
+
+	// Once regenerated, the entry is fresh again: every later read is a hit on the same value.
+	for (let i = 0; i < 5; i++) {
+		await page.goto(url);
+		expect(await page.getByTestId('nonce').innerText()).toBe(regenerated);
+	}
 });
 
 test('cache lives from cacheLife round-trip into the stored entry', async ({ page, request, harper }) => {
@@ -101,8 +164,7 @@ test('cache lives from cacheLife round-trip into the stored entry', async ({ pag
 	const rows = await searchUseCache(request, harper, ['id', 'revalidate', 'expire', 'stale']);
 	const withLives = rows.find((row: { revalidate?: number }) => typeof row.revalidate === 'number');
 
-	// Without these persisted, another node reads the entry but not its cache lives, and
-	// `calculateRevalidate` falls back to a 1-second default there.
+	// Without these persisted, the entry reads back as revalidate: 0 and is regenerated on every read.
 	expect(withLives, 'no entry carried its cache lives').toBeTruthy();
 	expect(withLives.expire).toBeGreaterThan(withLives.revalidate);
 });

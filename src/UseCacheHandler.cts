@@ -3,7 +3,12 @@ import type { CacheEntry, CacheHandler, Timestamp } from 'next/dist/server/lib/c
 
 import type { databases as DatabasesType } from 'harper';
 
-import { cacheInvalidations, initializeInvalidationSubscription, recordInvalidation } from './cacheInvalidation.cjs';
+import {
+	initializeInvalidationSubscription,
+	passedExpiration,
+	recordInvalidation,
+	tagState,
+} from './cacheInvalidation.cjs';
 
 const DATABASE = 'harperfast_nextjs';
 const TABLE = 'nextjs_use_cache';
@@ -15,7 +20,6 @@ interface StoredEntry {
 	stale?: number;
 	revalidate?: number;
 	expire?: number;
-	invalidatedAt?: number;
 }
 
 interface UseCacheTable {
@@ -113,17 +117,43 @@ export function toStorageKey(cacheKey: string): string {
 	return `${truncated}${KEY_HASH_SEPARATOR}${digest}`;
 }
 
-/** Harper returns a Blob for a Blob column; unit tests and older rows may hold raw bytes. */
-async function toBuffer(value: unknown): Promise<Buffer | undefined> {
+/**
+ * A fresh stream over the stored value, or undefined when it cannot be read. Harper returns a Blob for
+ * a Blob column, which is streamed straight from storage rather than read whole: `arrayBuffer()` would
+ * buffer the file and copy it. The first chunk is pulled before returning so a missing or unreadable
+ * blob still degrades to a cache MISS; `get` has no surrounding try, so a rejection here would surface
+ * as a request error instead. Unit tests and older rows may hold raw bytes.
+ */
+async function openValue(value: unknown): Promise<ReadableStream<Uint8Array> | undefined> {
 	if (value === undefined || value === null) return undefined;
-	if (Buffer.isBuffer(value)) return value;
-	if (value instanceof Uint8Array) return Buffer.from(value);
-	const blob = value as { arrayBuffer?: () => Promise<ArrayBuffer> };
-	if (typeof blob.arrayBuffer === 'function') {
-		// A rejecting arrayBuffer() (corrupt row, read error) must degrade to a cache MISS. `get` has no
-		// surrounding try, so an unhandled rejection here would surface as a request error instead.
+	if (value instanceof Uint8Array) return streamOf(value);
+	const blob = value as { stream?: () => ReadableStream<Uint8Array>; arrayBuffer?: () => Promise<ArrayBuffer> };
+	if (typeof blob.stream === 'function') {
+		const reader = blob.stream().getReader();
+		let first: ReadableStreamReadResult<Uint8Array>;
 		try {
-			return Buffer.from(await blob.arrayBuffer());
+			first = await reader.read();
+		} catch {
+			return undefined;
+		}
+		return new ReadableStream<Uint8Array>({
+			start(controller) {
+				if (first.done) controller.close();
+				else controller.enqueue(first.value);
+			},
+			async pull(controller) {
+				const { done, value: chunk } = await reader.read();
+				if (done) controller.close();
+				else controller.enqueue(chunk);
+			},
+			cancel(reason) {
+				return reader.cancel(reason);
+			},
+		});
+	}
+	if (typeof blob.arrayBuffer === 'function') {
+		try {
+			return streamOf(new Uint8Array(await blob.arrayBuffer()));
 		} catch {
 			return undefined;
 		}
@@ -150,28 +180,25 @@ function toStoredValue(bytes: Buffer): unknown {
  * A ReadableStream is single-use, so every read builds a new one over the stored bytes. Returning a
  * shared stream would serve the first reader and hand every later one an empty body.
  */
-function streamOf(bytes: Buffer): ReadableStream<Uint8Array> {
+function streamOf(bytes: Uint8Array): ReadableStream<Uint8Array> {
 	return new ReadableStream({
 		start(controller) {
-			controller.enqueue(new Uint8Array(bytes));
+			controller.enqueue(bytes);
 			controller.close();
 		},
 	});
 }
 
-function newestInvalidation(tags: string[]): number {
-	let newest = 0;
-	for (const tag of tags) {
-		const invalidatedAt = cacheInvalidations.get(tag);
-		if (invalidatedAt !== undefined && invalidatedAt > newest) newest = invalidatedAt;
-	}
-	return newest;
-}
-
 class HarperUseCacheHandler implements CacheHandler {
-	async get(cacheKey: string, softTags: string[]): Promise<CacheEntry | undefined> {
+	/**
+	 * Soft (implicit route) tags are left to Next, which compares them against `getExpiration`; the entry
+	 * does not carry them, so there is nothing more to check here.
+	 */
+	async get(cacheKey: string, _softTags: string[]): Promise<CacheEntry | undefined> {
 		const table = getTable();
 		if (!table) return undefined;
+		// A worker that has not yet read the tombstones back would serve invalidated entries as fresh.
+		await initializeInvalidationSubscription();
 
 		// An in-flight set for this key must be awaited rather than reported as a miss.
 		const pending = pendingEntries.get(cacheKey);
@@ -180,40 +207,27 @@ class HarperUseCacheHandler implements CacheHandler {
 		const record = await table.get(toStorageKey(cacheKey));
 		if (!record) return undefined;
 
-		const bytes = await toBuffer(record.value);
-		if (!bytes) return undefined;
-
 		const now = Date.now();
 		const timestamp = record.timestamp ?? 0;
 		const expire = record.expire ?? 0;
-		const revalidate = record.revalidate ?? 0;
+		const tags = record.tags ?? [];
 
+		// Decided before touching the blob, so an unusable entry costs no read.
 		if (expire > 0 && timestamp + expire * 1000 < now) return undefined;
+		const state = tagState(tags, timestamp, now);
+		if (state === 'expired') return undefined;
 
-		// Hard tags live on the record; soft tags are handled by getExpiration, which reports the
-		// invalidation timestamp for Next to compare itself. `invalidatedAt` is the sweep's own marker,
-		// which outlives the tombstone it was derived from.
-		const invalidatedAt = Math.max(newestInvalidation(record.tags ?? []), record.invalidatedAt ?? 0);
-
-		let effectiveTimestamp = timestamp;
-		if (invalidatedAt > timestamp) {
-			// Backdate past the revalidate window so Next regenerates, while staying inside expire so the
-			// entry is still served meanwhile. A miss here would cost a full render, which is exactly what
-			// an invalidation storm must not produce.
-			// Math.min: an entry already older than the revalidate window must not be forward-dated to
-			// staleAt, which would extend how long Next keeps serving it stale.
-			const staleAt = Math.min(timestamp, now - revalidate * 1000 - 1);
-			if (expire > 0 && staleAt + expire * 1000 <= now) return undefined;
-			effectiveTimestamp = staleAt;
-		}
+		const value = await openValue(record.value);
+		if (!value) return undefined;
 
 		return {
-			value: streamOf(bytes),
-			tags: record.tags ?? [],
+			value,
+			tags,
 			stale: record.stale ?? 0,
-			timestamp: effectiveTimestamp,
+			timestamp,
 			expire,
-			revalidate,
+			// Next's own handler signals a tag-stale entry this way: serve it, and regenerate in the background.
+			revalidate: state === 'stale' ? -1 : (record.revalidate ?? 0),
 		};
 	}
 
@@ -227,9 +241,10 @@ class HarperUseCacheHandler implements CacheHandler {
 			const bytes = await drain(entry.value);
 			if (!bytes) return undefined;
 
-			await table.put(toStorageKey(cacheKey), {
-				// The untruncated key, for identifying a row whose id was hashed. Not indexed.
-				cacheKey,
+			const storageKey = toStorageKey(cacheKey);
+			await table.put(storageKey, {
+				// The untruncated key, only for a row whose id had to be shortened. Not indexed.
+				...(storageKey === cacheKey ? {} : { cacheKey }),
 				value: toStoredValue(bytes),
 				tags: entry.tags ?? [],
 				timestamp: toInteger(entry.timestamp) ?? Date.now(),
@@ -246,7 +261,8 @@ class HarperUseCacheHandler implements CacheHandler {
 		try {
 			await work;
 		} catch (error) {
-			getLogger().error(`[UseCacheHandler] failed to store "${cacheKey}"`, error);
+			// The storage key: the full one is unbounded, and has been seen at 87KB.
+			getLogger().error(`[UseCacheHandler] failed to store "${toStorageKey(cacheKey)}"`, error);
 		} finally {
 			if (pendingEntries.get(cacheKey) === work) pendingEntries.delete(cacheKey);
 		}
@@ -261,9 +277,9 @@ class HarperUseCacheHandler implements CacheHandler {
 		await initializeInvalidationSubscription();
 	}
 
-	/** Newest invalidation across the tags, or 0 if none were ever invalidated. */
+	/** Newest expiration across the tags that has already passed, or 0 if there is none. */
 	async getExpiration(tags: string[]): Promise<Timestamp> {
-		return newestInvalidation(tags);
+		return passedExpiration(tags);
 	}
 
 	async updateTags(tags: string[], durations?: { expire?: number }): Promise<void> {

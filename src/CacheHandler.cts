@@ -14,14 +14,19 @@ import type {
 
 import type { databases as DatabasesType } from 'harper';
 
-import { initializeInvalidationSubscription, isInvalidated, recordInvalidation } from './cacheInvalidation.cjs';
+import {
+	initializeInvalidationSubscription,
+	nextServesStaleTags,
+	recordInvalidation,
+	tagState,
+} from './cacheInvalidation.cjs';
 
 const NEXT_CACHE_TAGS_HEADER = 'x-next-cache-tags';
 
-// Kinds for which Next re-checks its tags manifest and can classify an entry as *stale* rather than
-// missing. For anything else an invalidated entry has to be withheld, because Next would otherwise
-// serve it indefinitely.
-const TAG_AWARE_KINDS = new Set(['APP_PAGE', 'APP_ROUTE']);
+// Kinds for which Next 16's IncrementalCache itself checks the tags manifest and serves a tag-stale entry
+// stale-while-revalidate. For any other kind, or on Next 14/15, an invalidated entry has to be withheld,
+// because Next would otherwise serve it as fresh.
+const TAG_AWARE_KINDS = new Set(['APP_PAGE', 'APP_ROUTE', 'FETCH']);
 
 // `databases` is a Harper-provided global. Access it lazily so that loading this module from a
 // non-Harper context (e.g. a turbopack build worker that resolves the cacheHandler path) does not pull
@@ -61,16 +66,12 @@ function extractTags(
 	return [];
 }
 
-/**
- * True when Next will consult its own tags manifest for this entry and can therefore classify it as
- * stale. `recordInvalidation` mirrors every invalidation into that manifest, so for these kinds the
- * handler can return the entry and let Next serve it stale while regenerating, instead of forcing a
- * blocking miss.
- */
 function canServeStale(data: unknown): boolean {
 	const value = data as { kind?: string; headers?: Record<string, unknown> } | null;
-	if (!value?.kind || !TAG_AWARE_KINDS.has(value.kind)) return false;
-	return typeof value.headers?.[NEXT_CACHE_TAGS_HEADER] === 'string';
+	if (!value?.kind || !TAG_AWARE_KINDS.has(value.kind) || !nextServesStaleTags()) return false;
+	// FETCH entries are tag-checked against the request's own tags; pages only through the header Next
+	// wrote into the entry.
+	return value.kind === 'FETCH' || typeof value.headers?.[NEXT_CACHE_TAGS_HEADER] === 'string';
 }
 
 function isExpired(record: { lastModified?: number; expire?: number }): boolean {
@@ -93,31 +94,31 @@ export default class HarperCacheHandler implements CacheHandler {
 	): Promise<CacheHandlerValue | null> {
 		const databases = getDatabases();
 		if (!databases) return null;
+		// A worker that has not yet read the tombstones back would serve invalidated entries as fresh.
+		await initializeInvalidationSubscription();
 
 		const table = databases.harperfast_nextjs.nextjs_isr_cache;
 		const record = await table.get(key);
-		if (!record) return null;
+		if (!record || record.data === undefined) return null;
 
 		// Past its own `expire` the entry is no longer usable at all, regardless of tags.
 		if (isExpired(record as { lastModified?: number; expire?: number })) return null;
 
 		const recordTags = Array.isArray(record.tags) ? (record.tags as string[]) : [];
+		const ctxTags = [
+			...('tags' in ctx && Array.isArray(ctx.tags) ? ctx.tags : []),
+			...('softTags' in ctx && Array.isArray(ctx.softTags) ? ctx.softTags : []),
+		];
+		const tags = [...recordTags, ...ctxTags];
 
-		const ctxTags =
-			'tags' in ctx && Array.isArray(ctx.tags)
-				? [...ctx.tags, ...('softTags' in ctx && Array.isArray(ctx.softTags) ? ctx.softTags : [])]
-				: [];
+		// An on-demand revalidation for this request is an explicit demand for fresh content.
+		if (tags.some((tag) => this.revalidatedTags.includes(tag))) return null;
 
-		const markedInvalidAt = (record as { invalidatedAt?: number }).invalidatedAt;
-
-		if (isInvalidated(recordTags, record.lastModified ?? 0, this.revalidatedTags, ctxTags, markedInvalidAt)) {
-			// An on-demand revalidation for this request is an explicit demand for fresh content.
-			if (recordTags.some((tag) => this.revalidatedTags.includes(tag))) return null;
-
-			// Otherwise prefer stale-while-revalidate where Next supports it: a miss here costs a full
-			// blocking render, which is exactly what an invalidation storm must not produce.
-			if (!canServeStale(record.data)) return null;
-		}
+		const state = tagState(tags, record.lastModified ?? 0);
+		if (state === 'expired') return null;
+		// Where Next serves a tag-stale entry stale-while-revalidate on its own, hand it over with its real
+		// age: a miss here would cost a full blocking render.
+		if (state === 'stale' && !canServeStale(record.data)) return null;
 
 		return {
 			value: record.data as IncrementalCacheValue | null,
@@ -136,11 +137,8 @@ export default class HarperCacheHandler implements CacheHandler {
 		const table = databases.harperfast_nextjs.nextjs_isr_cache;
 		const tags = extractTags(data, ctx);
 
-		// Next keeps cache lives in a per-process Map plus the build-time prerender manifest, neither of
-		// which replicates. Persisting them alongside the entry is what lets another node compute the
-		// same staleness instead of falling back to `calculateRevalidate`'s 1-second default.
-		// Floored because Harper rejects a non-integer for an Int column, and a rejected write here is
-		// silent — the entry simply never lands.
+		// Persisted so the entry's own `expire` is enforced on every node. Floored because Harper rejects a
+		// non-integer for an Int column, and a rejected write here is silent — the entry simply never lands.
 		const cacheControl = 'cacheControl' in ctx ? ctx.cacheControl : undefined;
 		const revalidate = typeof cacheControl?.revalidate === 'number' ? Math.floor(cacheControl.revalidate) : undefined;
 		const expire = typeof cacheControl?.expire === 'number' ? Math.floor(cacheControl.expire) : undefined;

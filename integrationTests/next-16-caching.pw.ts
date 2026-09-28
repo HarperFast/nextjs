@@ -146,48 +146,61 @@ test('revalidateTag records the invalidation and regenerates the entry', async (
 	const revalidateResponse = await request.post(revalidateURL);
 	expect(revalidateResponse.status()).toBe(200);
 
-	// The invalidation must be durably recorded, but *where* is deliberately not asserted: the tombstone
-	// in nextjs_cache_invalidation is transient — the background sweep marks the matching entries and
-	// then drops it — so asserting the row still exists is a race against the sweep finishing. Either
-	// the tombstone or the sweep's own `invalidatedAt` marker on the entry is valid evidence.
-	const recorded = async () => {
-		const [tombstones, entries] = await Promise.all([
-			request.post(harper.operationsAPIURL, {
-				headers: { 'Content-Type': 'application/json', Authorization: authHeader },
-				data: {
-					operation: 'search_by_value',
-					database: 'harperfast_nextjs',
-					table: 'nextjs_cache_invalidation',
-					search_attribute: 'id',
-					search_value: 'test-tag',
-					get_attributes: ['id', 'timestamp'],
-				},
-			}),
-			request.post(harper.operationsAPIURL, {
-				headers: { 'Content-Type': 'application/json', Authorization: authHeader },
-				data: {
-					operation: 'search_by_value',
-					database: 'harperfast_nextjs',
-					table: 'nextjs_isr_cache',
-					search_attribute: 'id',
-					search_value: '*',
-					get_attributes: ['id', 'invalidatedAt'],
-				},
-			}),
-		]);
-		const tombstoneRows = await tombstones.json();
-		const entryRows = await entries.json();
-		return (
-			tombstoneRows.length > 0 || entryRows.some((row: { invalidatedAt?: number }) => typeof row.invalidatedAt === 'number')
-		);
-	};
-	expect(await recorded(), 'the invalidation left no trace in either table').toBe(true);
+	// The tombstone is what every worker and node compares entries against, so it must outlive every
+	// entry it invalidates — those live at most the table's 7 days from their last write.
+	const tombstones = await request.post(harper.operationsAPIURL, {
+		headers: { 'Content-Type': 'application/json', Authorization: authHeader },
+		data: {
+			operation: 'search_by_value',
+			database: 'harperfast_nextjs',
+			table: 'nextjs_cache_invalidation',
+			search_attribute: 'id',
+			search_value: 'test-tag',
+			get_attributes: ['id', 'timestamp', 'expired', 'lapsesAt'],
+		},
+	});
+	const [tombstone] = await tombstones.json();
+	expect(tombstone, 'the invalidation left no tombstone').toBeTruthy();
+	expect(tombstone.expired).toBe(tombstone.timestamp);
+	expect(tombstone.lapsesAt).toBeGreaterThan(tombstone.timestamp + 604_800_000);
 
-	// The entry regenerates. The first request after an invalidation may be served stale while
-	// regeneration runs in the background — that is deliberate, since a blocking miss here costs a full
-	// render — so poll for the new content rather than demanding it on the very next request.
+	// revalidateTag(tag) with no profile expires the tag, so the entry is regenerated. Polled because the
+	// next request can land on a worker the replicated tombstone has not reached yet.
 	await expect(async () => {
 		await page.goto(taggedURL);
 		expect(await page.getByTestId('nonce').innerText()).not.toBe(nonceBefore);
+	}).toPass({ timeout: 15_000 });
+});
+
+// revalidateTag(tag, 'max'): stale now, expired a year out. Next 16 serves the page stale while it
+// regenerates, and the regenerated page is a HIT again — rather than the pre-fix behaviour, where the
+// expiry was stored as the stale time and every entry stayed stale (or, for fetches, missing) for a year.
+test('revalidateTag with a profile serves the page stale, then a fresh HIT', async ({ request, harper, page }) => {
+	const taggedURL = `${harper.httpURL}/tagged`;
+
+	await page.goto(taggedURL);
+	const warmed = await page.goto(taggedURL);
+	expect(warmed!.headers()['x-nextjs-cache']).toBe('HIT');
+	const nonceBefore = await page.getByTestId('nonce').innerText();
+
+	const revalidateResponse = await request.post(`${harper.httpURL}/api/revalidate?tag=test-tag&profile=max`);
+	expect(revalidateResponse.status()).toBe(200);
+
+	// Served stale, not expired: somewhere before the new content appears, the old page is served with a
+	// STALE header rather than blocking on a render.
+	let servedStale = false;
+	let regenerated = '';
+	await expect(async () => {
+		const response = await page.goto(taggedURL);
+		regenerated = await page.getByTestId('nonce').innerText();
+		if (response!.headers()['x-nextjs-cache'] === 'STALE' && regenerated === nonceBefore) servedStale = true;
+		expect(regenerated).not.toBe(nonceBefore);
+	}).toPass({ timeout: 15_000 });
+	expect(servedStale, 'the page was never served stale while it regenerated').toBe(true);
+
+	await expect(async () => {
+		const response = await page.goto(taggedURL);
+		expect(response!.headers()['x-nextjs-cache']).toBe('HIT');
+		expect(await page.getByTestId('nonce').innerText()).toBe(regenerated);
 	}).toPass({ timeout: 15_000 });
 });

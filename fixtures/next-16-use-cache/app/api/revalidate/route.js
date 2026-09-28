@@ -6,6 +6,9 @@ export async function POST(request) {
 	if (!tag) {
 		return NextResponse.json({ error: 'tag required' }, { status: 400 });
 	}
-	revalidateTag(tag);
-	return NextResponse.json({ revalidated: true, tag });
+	// `profile` selects Next 16's stale-while-revalidate form; without it the tag expires immediately.
+	const profile = new URL(request.url).searchParams.get('profile');
+	if (profile) revalidateTag(tag, profile);
+	else revalidateTag(tag);
+	return NextResponse.json({ revalidated: true, tag, profile });
 }

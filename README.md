@@ -272,6 +272,16 @@ export async function POST(request) {
 
 `fetch()` calls with `next: { tags: [...] }` and the `'use cache'` directive (with `cacheTag()`) are also supported — anywhere Next.js attaches tags to a cached value, the handler will pick them up.
 
+On Next.js 16, pick the form that matches what you want the next visitor to get:
+
+| Call | Effect |
+| --- | --- |
+| `revalidateTag(tag, 'max')` (or another profile) | Stale now: the cached response is served once more while it regenerates in the background. Expires when the profile's `expire` passes. |
+| `revalidateTag(tag)`, `updateTag(tag)` | Expired now: the next request blocks on a fresh render. The one-argument `revalidateTag` is deprecated by Next.js. |
+| `revalidatePath(path)` | Expired now, for the route's implicit tags. |
+
+`updateTag` reaches the handlers the same way the one-argument `revalidateTag` does.
+
 ### `useCache`
 
 Route `'use cache'` entries to Harper by registering `cacheHandlers`:
@@ -291,6 +301,9 @@ export default withHarper(
 
 Requires Next.js 16, which is where the interface exists. Opt-in for now — it becomes the default in the next major, because turning it on changes where existing apps' `'use cache'` entries are stored.
 
+- **Values are streamed.** Each entry's rendered bytes are stored as a Harper `Blob` and streamed back from storage on every read, rather than read into memory whole. A write is buffered until the render completes, so a render that fails partway is never stored.
+- **Keys of any size work.** Next.js builds a `'use cache'` key from the component's props and puts no limit on its size, while Harper caps a primary key at 1978 bytes. A key over 1500 bytes is stored under a truncated prefix plus a hash of the full key, and the full key is kept in the row's `cacheKey` column. Shorter keys are stored as they are. Large props still make large keys, so keep a cached component's props small.
+
 ### Per-entry cache lives
 
 Both handlers persist the `revalidate` and `expire` Next.js supplies for each entry.
@@ -306,30 +319,18 @@ The legacy incremental-cache handler persists them too, but there the effect is 
 
 ### How invalidation works
 
-The cache handler uses a **soft-invalidation** model:
+Invalidation follows Next.js's own semantics. `revalidateTag(tag)` and `updateTag(tag)` expire matching entries immediately. `revalidateTag(tag, profile)` (for example `'max'`) marks them stale now, so they are served while regenerating in the background, and expires them once the profile's `expire` has passed.
 
-1. `revalidateTag(tag)` writes a `{ tag, timestamp }` row to the `nextjs_cache_invalidation` table and updates an in-memory map in the calling worker.
-2. Every other Harper worker subscribes to that table and updates its own map when the row is replicated — typically within milliseconds.
-3. On the next `cache.get()`, an invalidated entry is reported to Next.js as *stale* rather than missing wherever Next.js supports that, so it serves the cached response and regenerates in the background. An invalidation storm should not turn into a render storm.
-4. A worker that restarts rebuilds its map from the tombstone table, so an invalidation survives the process that issued it.
+1. `revalidateTag` writes one row per tag to `nextjs_cache_invalidation` (a *tombstone*, holding the tag's `stale` and `expired` times) and updates an in-memory map in the calling worker.
+2. Every other Harper worker subscribes to that table and updates its own map when the row is replicated — typically within milliseconds. The map is mirrored into Next.js's own tags manifest, so Next's in-process checks agree with it.
+3. On the next `cache.get()`, an entry written before the invalidation is withheld if the tag has expired. If the tag is only stale, it is handed to Next.js to serve stale while regenerating wherever Next.js supports that (Next.js 16 for pages, route handlers and `fetch`; the `'use cache'` handler always). Otherwise it is withheld.
+4. A worker that restarts rebuilds its map from the tombstones, so an invalidation survives the process that issued it.
 
-Entries are never hard-deleted; Next.js overwrites them on the next regeneration. The `nextjs_cache_invalidation` rows expire after 7 days so abandoned tags don't accumulate.
+**A tombstone outlives every entry it can invalidate.** Harper caps each cache entry at its table's `expiration`, counted from its last write, so each tombstone is written with its own expiry: the longer of the two cache tables' expirations, plus an hour for renders that finish after the invalidation and for replication lag. An invalidated entry therefore expires before its tombstone does and cannot come back. The in-memory map drops a tag once its tombstone lapses. A cache table configured with no expiration breaks that bound and is reported in the log.
 
-> [!NOTE]
-> A throttled background sweep — which would mark matching entries and then drop the tombstone, so the tombstone's lifetime stops being a correctness parameter — is implemented but **off by default**, behind `HARPER_NEXTJS_EXPERIMENTAL_SWEEP=true`. No available primitive marks an entry stale without breaking something else:
->
-> | Primitive | Behaviour |
-> | --- | --- |
-> | `invalidate()` | A no-op. Measured on Harper 5.1.23 and 5.2.0, against both a plain table and a `sourcedFrom` one: the record reads back unchanged and the source is never re-invoked. A sweep built on it drops the tombstone while leaving entries untouched, losing the invalidation outright. |
-> | `delete()` | Works, but a deleted entry is a miss, and a miss is a full render — the thing this design exists to avoid. |
-> | `patch()` | Bumps `lastModified` (`@updatedTime`), so the entry looks *newer* than the invalidation to Next.js's `areTagsStale`. Next.js treats it as fresh and never regenerates. |
->
-> Stale-while-revalidate comes from the tags-manifest mirror at read time, not from the sweep, so leaving the sweep off costs only tombstone-table growth — which the 7-day expiry already bounds.
+An immediate expiry is also **swept**: entries carrying the tag are looked up through the indexed `tags` column (an exact-match index lookup, not a scan) and deleted in throttled chunks, so they stop taking up space before their own expiry. This includes Next.js's implicit route tags, so `revalidatePath` is swept too. While Harper reports the index as still being built, the sweep scans with the same exact match instead. The sweep only reclaims space, and reads never depend on it: a sweep that fails or is interrupted leaves the entries to expire on their own. A stale-then-expire invalidation is not swept, because those entries must stay servable while they regenerate.
 
-Two limits the sweep is designed around, for when it is enabled:
-
-- **Next.js's implicit route tags (`_N_T_…`) are never swept.** A tag like `_N_T_/layout` is carried by every page in the app, so sweeping one would scan and rewrite the entire cache. Those are left to expire.
-- **`tags` is not indexed.** Harper cannot index array elements, and the `contains` comparator cannot use an index regardless, so a sweep scans. That is why sweeps are chunked with bounded concurrency, and why broad tags are excluded rather than throttled.
+`'use cache'` entries do not carry the implicit route tags `revalidatePath` targets. Next.js checks those through `getExpiration`, which reports only expirations that have already passed.
 
 Harper pushes invalidations to every worker via table replication, so the `refreshTags()` call the `'use cache'` interface expects to poll a tags service is a no-op here — the map it would refresh is already current.
 
@@ -339,12 +340,20 @@ Enabling the cache handler adds these tables to the `harperfast_nextjs` database
 
 | Table | Purpose |
 | --- | --- |
-| `nextjs_isr_cache` | One row per cached ISR/Data Cache entry. Stores `data` (the Next.js `IncrementalCacheValue`), `tags`, the entry's `revalidate`/`expire`, and `lastModified`. |
-| `nextjs_use_cache` | One row per `'use cache'` entry. Stores `value` (the rendered bytes as a `Blob`), `tags`, `timestamp`, and the entry's `stale`/`revalidate`/`expire`. |
-| `nextjs_cache_invalidation` | One row per invalidated tag. `id` is the tag itself; `timestamp` is when `revalidateTag` was called. Auto-expires after 7 days. |
+| `nextjs_isr_cache` | One row per cached ISR/Data Cache entry. Stores `data` (the Next.js `IncrementalCacheValue`), `tags` (indexed), the entry's `revalidate`/`expire`, and `lastModified`. |
+| `nextjs_use_cache` | One row per `'use cache'` entry. Stores `value` (the rendered bytes as a `Blob`), `tags` (indexed), `timestamp`, and the entry's `stale`/`revalidate`/`expire`. |
+| `nextjs_cache_invalidation` | One row per invalidated tag. `id` is the tag itself; `timestamp` is when `revalidateTag` was called; `stale`/`expired` are the tag's invalidation in Next.js's terms; `lapsesAt` is when the row expires, which is later than any entry it invalidates. |
 
 > [!NOTE]
-> A table's `expiration` is fixed when the table is created — changing it in `schema.graphql` does not migrate an existing table. Verify with `describe_table` after upgrading; an instance created before a change will still report the old value.
+> A table's `expiration` is fixed when the table is created — changing it in `schema.graphql` does not migrate an existing table. Verify with `describe_table` after upgrading; an instance created before a change will still report the old value. Tombstone lifetimes are computed from the expiration each cache table actually has, so they stay correct either way.
+
+### Upgrading
+
+No manual migration is needed; existing tables, entries and tombstones keep working.
+
+- **Existing entries are kept** and served without regenerating.
+- **`tags` becomes indexed on both cache tables.** Harper builds the index for existing rows in the background on first start; nothing is unavailable meanwhile. On Harper 5.2.0 some worker threads were seen to keep reporting that index as unfinished until the next restart; the sweep falls back to a scan in that case, and reads are unaffected.
+- **Tombstones written by earlier versions** (a bare `timestamp`) are read as an immediate expiry at that time. Pre-release builds of `'use cache'` support stored `revalidateTag(tag, profile)` as a timestamp up to a year ahead; those rows no longer block later invalidations of the same tag, and they expire on the table's own 7-day schedule.
 
 ## Contributing
 

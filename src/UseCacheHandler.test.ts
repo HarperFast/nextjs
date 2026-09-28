@@ -2,7 +2,11 @@ import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert';
 import { createRequire } from 'node:module';
 
-import { cacheInvalidations } from './cacheInvalidation.cjs';
+import {
+	cacheInvalidations,
+	resetInvalidationStateForTesting,
+	type TagInvalidation,
+} from './cacheInvalidation.cjs';
 import { toStorageKey } from './UseCacheHandler.cjs';
 
 interface UseCacheEntry {
@@ -103,6 +107,7 @@ function installDatabases() {
 	(globalThis as Record<string, unknown>).databases = {
 		harperfast_nextjs: {
 			nextjs_use_cache: {
+				expirationMS: 604_800_000,
 				async get(key: string) {
 					return rows.get(key);
 				},
@@ -114,22 +119,20 @@ function installDatabases() {
 				search() {
 					return (async function* () {})();
 				},
-				async invalidate() {},
 			},
 			nextjs_isr_cache: {
+				expirationMS: 604_800_000,
 				search() {
 					return (async function* () {})();
 				},
-				async invalidate() {},
 			},
 			nextjs_cache_invalidation: {
-				puts: [] as Array<{ key: string; value: { timestamp: number } }>,
-				async put(key: string, value: { timestamp: number }) {
-					this.puts.push({ key, value });
+				async put() {},
+				search() {
+					return (async function* () {})();
 				},
-				async delete() {},
-				async getRecordCount() {
-					return { recordCount: 0 };
+				async subscribe() {
+					return { on() {} };
 				},
 			},
 		},
@@ -139,7 +142,7 @@ function installDatabases() {
 
 describe('UseCacheHandler streaming', () => {
 	beforeEach(() => {
-		cacheInvalidations.clear();
+		resetInvalidationStateForTesting();
 		installDatabases();
 	});
 
@@ -197,7 +200,7 @@ describe('UseCacheHandler streaming', () => {
 
 describe('UseCacheHandler cache lives', () => {
 	beforeEach(() => {
-		cacheInvalidations.clear();
+		resetInvalidationStateForTesting();
 		installDatabases();
 	});
 
@@ -251,17 +254,30 @@ describe('UseCacheHandler cache lives', () => {
 	});
 });
 
+function invalidate(tag: string, fields: Omit<TagInvalidation, 'lapsesAt'>) {
+	cacheInvalidations.set(tag, { lapsesAt: Number.MAX_SAFE_INTEGER, ...fields });
+}
+
 describe('UseCacheHandler tags', () => {
 	beforeEach(() => {
-		cacheInvalidations.clear();
+		resetInvalidationStateForTesting();
 		installDatabases();
 	});
 
-	it('reports the newest invalidation timestamp for the given tags', async () => {
-		cacheInvalidations.set('a', 1000);
-		cacheInvalidations.set('b', 5000);
+	it('reports the newest expiration that has passed for the given tags', async () => {
+		invalidate('a', { expired: 1000, at: 1000 });
+		invalidate('b', { expired: 5000, at: 5000 });
 
 		assert.equal(await handler.getExpiration(['a', 'b']), 5000);
+	});
+
+	// Next discards every entry created at or before the reported expiration. Reporting a deferred one
+	// early discarded entries regenerated after the invalidation too.
+	it('does not report an expiration that is still in the future', async () => {
+		const now = Date.now();
+		invalidate('a', { stale: now, expired: now + 31_536_000_000, at: now });
+
+		assert.equal(await handler.getExpiration(['a']), 0);
 	});
 
 	it('reports 0 when no tag was ever invalidated', async () => {
@@ -274,40 +290,109 @@ describe('UseCacheHandler tags', () => {
 		assert.ok(cacheInvalidations.has('products'));
 	});
 
-	it('serves an invalidated entry as stale rather than missing, while it is still inside expire', async () => {
+	it('serves a tag-stale entry for background revalidation, the way Next\'s own handler does', async () => {
 		const now = Date.now();
-		await handler.set(
-			'tagged',
-			Promise.resolve(entry({ tags: ['products'], timestamp: now, revalidate: 300, expire: 3600 }))
-		);
-		cacheInvalidations.set('products', now + 1000);
+		await handler.set('tagged', Promise.resolve(entry({ tags: ['products'], timestamp: now, revalidate: 300 })));
+		invalidate('products', { stale: now + 1000, at: now + 1000 });
 
 		const result = await handler.get('tagged', []);
 
 		assert.ok(result, 'a miss here costs a full render; stale-then-regenerate is the point');
-		// Backdated past its revalidate window so Next regenerates, but still inside expire so it is usable.
-		assert.ok(result.timestamp + result.revalidate * 1000 < Date.now());
-		assert.ok(result.timestamp + result.expire * 1000 > Date.now());
+		assert.equal(result.revalidate, -1);
+		assert.equal(result.timestamp, now, 'the entry keeps its real timestamp');
 	});
 
-	it('withholds an invalidated entry that is also past expire', async () => {
+	it('withholds a tag-expired entry', async () => {
 		const now = Date.now();
-		await handler.set(
-			'gone',
-			Promise.resolve(entry({ tags: ['products'], timestamp: now - 120_000, revalidate: 10, expire: 60 }))
-		);
-		cacheInvalidations.set('products', now);
+		await handler.set('gone', Promise.resolve(entry({ tags: ['products'], timestamp: now - 5000 })));
+		invalidate('products', { expired: now - 1000, at: now - 1000 });
 
 		assert.equal(await handler.get('gone', []), undefined);
 	});
 
+	// revalidateTag(tag, 'max'): the expiry was used as the stale time, so an entry regenerated after
+	// the invalidation was still backdated and regenerated on every read for a year.
+	it('serves an entry written after a deferred-expiry invalidation as fresh', async () => {
+		await handler.updateTags(['posts'], { expire: 31_536_000 });
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		const now = Date.now();
+		await handler.set('regenerated', Promise.resolve(entry({ tags: ['posts'], timestamp: now, revalidate: 900 })));
+
+		const result = await handler.get('regenerated', []);
+
+		assert.ok(result);
+		assert.equal(result.revalidate, 900);
+		assert.equal(result.timestamp, now);
+	});
+});
+
+/** A Harper Blob stand-in that records how it was read. */
+function fakeBlob(text: string, options: { failFirstRead?: boolean } = {}) {
+	const calls = { stream: 0, arrayBuffer: 0 };
+	return {
+		calls,
+		stream() {
+			calls.stream++;
+			if (options.failFirstRead) {
+				return new ReadableStream<Uint8Array>({
+					pull() {
+						throw new Error('Blob file not found');
+					},
+				});
+			}
+			return streamOf(text);
+		},
+		async arrayBuffer() {
+			calls.arrayBuffer++;
+			return new TextEncoder().encode(text).buffer;
+		},
+	};
+}
+
+describe('UseCacheHandler blob reads', () => {
+	let rows: Map<string, Record<string, unknown>>;
+
+	beforeEach(() => {
+		resetInvalidationStateForTesting();
+		rows = installDatabases();
+	});
+
+	function storeRow(key: string, value: unknown, overrides: Record<string, unknown> = {}) {
+		rows.set(key, { id: key, value, tags: [], timestamp: Date.now(), revalidate: 300, expire: 3600, stale: 60, ...overrides });
+	}
+
+	it('streams a Blob from storage instead of reading it whole', async () => {
+		const blob = fakeBlob('streamed');
+		storeRow('blob', blob);
+
+		const result = await handler.get('blob', []);
+
+		assert.ok(result);
+		assert.equal(await readAll(result.value), 'streamed');
+		assert.equal(blob.calls.stream, 1);
+		assert.equal(blob.calls.arrayBuffer, 0);
+	});
+
+	it('degrades to a miss when the blob cannot be read', async () => {
+		storeRow('missing', fakeBlob('', { failFirstRead: true }));
+
+		assert.equal(await handler.get('missing', []), undefined);
+	});
+
+	it('does not read the blob of an entry it is going to withhold', async () => {
+		const blob = fakeBlob('old');
+		storeRow('expired', blob, { timestamp: Date.now() - 120_000, expire: 60 });
+
+		assert.equal(await handler.get('expired', []), undefined);
+		assert.equal(blob.calls.stream, 0);
+	});
 });
 
 describe('UseCacheHandler oversized keys', () => {
 	let rows: Map<string, Record<string, unknown>>;
 
 	beforeEach(() => {
-		cacheInvalidations.clear();
+		resetInvalidationStateForTesting();
 		rows = installDatabases();
 	});
 
@@ -365,5 +450,11 @@ describe('UseCacheHandler oversized keys', () => {
 
 		const [row] = [...rows.values()];
 		assert.equal(row.cacheKey, key);
+	});
+
+	it('does not duplicate a key that fit as the id', async () => {
+		await handler.set('short', Promise.resolve(entry({ value: streamOf('v') })));
+
+		assert.equal(rows.get('short')?.cacheKey, undefined);
 	});
 });
