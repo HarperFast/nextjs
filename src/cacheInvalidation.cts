@@ -141,9 +141,28 @@ export async function runWithConcurrency<T>(
 let unboundedCacheReported = false;
 
 /**
+ * Harper's per-record expiry for a cache entry: when Next says it stops being usable (`expire` seconds
+ * after `writtenAt`), capped at the table's `expiration`. The cap is what `tombstoneLifetimeMs` relies
+ * on — no entry may outlive the tombstones that can invalidate it — so the handlers set it explicitly
+ * rather than leave the record's lifetime to whatever a write's context happens to carry. Undefined
+ * leaves the table default in place.
+ */
+export function entryExpiresAt(
+	table: { expirationMS?: number } | undefined,
+	writtenAt: number,
+	expireSeconds: number | undefined,
+	now: number = Date.now()
+): number | undefined {
+	if (typeof expireSeconds !== 'number' || !Number.isFinite(expireSeconds) || expireSeconds <= 0) return undefined;
+	const ttl = table?.expirationMS;
+	const expiresAt = writtenAt + expireSeconds * 1000;
+	return typeof ttl === 'number' && ttl > 0 ? Math.min(expiresAt, now + ttl) : expiresAt;
+}
+
+/**
  * How long a tombstone must live: past the last moment any entry written before the invalidation can
- * still be read. Harper caps every record at its table's `expiration`, counted from its last write, so
- * that bound is the longer of the two cache tables' TTLs plus the margin.
+ * still be read. Entries expire at most their table's `expiration` after their last write (see
+ * `entryExpiresAt`), so that bound is the longer of the two cache tables' TTLs plus the margin.
  */
 export function tombstoneLifetimeMs(deps: InvalidationDeps = {}): number {
 	const scope = getScope(deps);

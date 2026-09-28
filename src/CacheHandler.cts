@@ -15,6 +15,7 @@ import type {
 import type { databases as DatabasesType } from 'harper';
 
 import {
+	entryExpiresAt,
 	initializeInvalidationSubscription,
 	nextServesStaleTags,
 	recordInvalidation,
@@ -143,7 +144,9 @@ export default class HarperCacheHandler implements CacheHandler {
 		const revalidate = typeof cacheControl?.revalidate === 'number' ? Math.floor(cacheControl.revalidate) : undefined;
 		const expire = typeof cacheControl?.expire === 'number' ? Math.floor(cacheControl.expire) : undefined;
 
-		await table.put(key, { data, tags, revalidate, expire });
+		const now = Date.now();
+		const expiresAt = entryExpiresAt(table as { expirationMS?: number }, now, expire, now);
+		await table.put(key, { data, tags, revalidate, expire }, expiresAt === undefined ? undefined : ({ expiresAt } as never));
 	}
 
 	async revalidateTag(tags: string | string[], durations?: { expire?: number }): Promise<void> {

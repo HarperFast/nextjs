@@ -32,7 +32,7 @@ interface StoredRecord {
 }
 
 function installDatabases(records: Record<string, StoredRecord> = {}) {
-	const puts: Array<{ key: string; value: Record<string, unknown> }> = [];
+	const puts: Array<{ key: string; value: Record<string, unknown>; context?: { expiresAt?: number } }> = [];
 	const invalidationPuts: Array<{ key: string; value: Record<string, unknown> }> = [];
 
 	(globalThis as Record<string, unknown>).databases = {
@@ -42,8 +42,8 @@ function installDatabases(records: Record<string, StoredRecord> = {}) {
 				async get(key: string) {
 					return records[key];
 				},
-				async put(key: string, value: Record<string, unknown>) {
-					puts.push({ key, value });
+				async put(key: string, value: Record<string, unknown>, context?: { expiresAt?: number }) {
+					puts.push({ key, value, context });
 					records[key] = { ...(value as unknown as StoredRecord), lastModified: Date.now() };
 				},
 				search() {
@@ -110,6 +110,21 @@ describe('HarperCacheHandler per-entry cache lives', () => {
 		assert.equal(puts.length, 1);
 		assert.equal(puts[0].value.revalidate, 300);
 		assert.equal(puts[0].value.expire, 3600);
+	});
+
+	it("sets the record's Harper expiry from Next's expire, capped at the table's", async () => {
+		const { puts } = installDatabases();
+		const handler = new HarperCacheHandler();
+		const before = Date.now();
+
+		await handler.set('/short', appPage([]) as never, { cacheControl: { revalidate: 60, expire: 3600 } } as never);
+		await handler.set('/long', appPage([]) as never, { cacheControl: { revalidate: 60, expire: 31_536_000 } } as never);
+		await handler.set('/none', appPage([]) as never, { cacheControl: { revalidate: 60 } } as never);
+
+		const [short, long, none] = puts.map((put) => put.context?.expiresAt);
+		assert.ok(short! >= before + 3_600_000 && short! <= Date.now() + 3_600_000);
+		assert.ok(long! <= Date.now() + 604_800_000, 'no entry may outlive the table TTL its tombstones are sized for');
+		assert.equal(none, undefined);
 	});
 
 	it('stores no revalidate when Next supplies false', async () => {

@@ -4,6 +4,7 @@ import type { CacheEntry, CacheHandler, Timestamp } from 'next/dist/server/lib/c
 import type { databases as DatabasesType } from 'harper';
 
 import {
+	entryExpiresAt,
 	initializeInvalidationSubscription,
 	passedExpiration,
 	recordInvalidation,
@@ -24,7 +25,8 @@ interface StoredEntry {
 
 interface UseCacheTable {
 	get(key: string): Promise<StoredEntry | undefined>;
-	put(key: string, value: Record<string, unknown>): Promise<unknown> | unknown;
+	put(key: string, value: Record<string, unknown>, context?: { expiresAt: number }): Promise<unknown> | unknown;
+	expirationMS?: number;
 }
 
 /**
@@ -242,16 +244,23 @@ class HarperUseCacheHandler implements CacheHandler {
 			if (!bytes) return undefined;
 
 			const storageKey = toStorageKey(cacheKey);
-			await table.put(storageKey, {
-				// The untruncated key, only for a row whose id had to be shortened. Not indexed.
-				...(storageKey === cacheKey ? {} : { cacheKey }),
-				value: toStoredValue(bytes),
-				tags: entry.tags ?? [],
-				timestamp: toInteger(entry.timestamp) ?? Date.now(),
-				stale: toInteger(entry.stale),
-				revalidate: toInteger(entry.revalidate),
-				expire: toInteger(entry.expire),
-			});
+			const timestamp = toInteger(entry.timestamp) ?? Date.now();
+			const expire = toInteger(entry.expire);
+			const expiresAt = entryExpiresAt(table, timestamp, expire);
+			await table.put(
+				storageKey,
+				{
+					// The untruncated key, only for a row whose id had to be shortened. Not indexed.
+					...(storageKey === cacheKey ? {} : { cacheKey }),
+					value: toStoredValue(bytes),
+					tags: entry.tags ?? [],
+					timestamp,
+					stale: toInteger(entry.stale),
+					revalidate: toInteger(entry.revalidate),
+					expire,
+				},
+				expiresAt === undefined ? undefined : { expiresAt }
+			);
 
 			return bytes;
 		})();

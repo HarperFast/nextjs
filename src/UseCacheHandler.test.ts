@@ -102,8 +102,11 @@ function enforceSchema(value: Record<string, unknown>) {
 	}
 }
 
+const putContexts = new Map<string, { expiresAt?: number } | undefined>();
+
 function installDatabases() {
 	const rows = new Map<string, Record<string, unknown>>();
+	putContexts.clear();
 	(globalThis as Record<string, unknown>).databases = {
 		harperfast_nextjs: {
 			nextjs_use_cache: {
@@ -111,10 +114,11 @@ function installDatabases() {
 				async get(key: string) {
 					return rows.get(key);
 				},
-				async put(key: string, value: Record<string, unknown>) {
+				async put(key: string, value: Record<string, unknown>, context?: { expiresAt?: number }) {
 					enforcePrimaryKey(key);
 					enforceSchema(value);
 					rows.set(key, { id: key, ...value });
+					putContexts.set(key, context);
 				},
 				search() {
 					return (async function* () {})();
@@ -240,6 +244,15 @@ describe('UseCacheHandler cache lives', () => {
 		assert.ok(Number.isInteger(result.stale));
 		assert.ok(Number.isInteger(result.revalidate));
 		assert.ok(Number.isInteger(result.expire));
+	});
+
+	it("sets the record's Harper expiry from the entry's own expire, capped at the table's", async () => {
+		const now = Date.now();
+		await handler.set('hours', Promise.resolve(entry({ timestamp: now, expire: 86_400 })));
+		await handler.set('max', Promise.resolve(entry({ timestamp: now, expire: 31_536_000 })));
+
+		assert.equal(putContexts.get('hours')?.expiresAt, now + 86_400_000);
+		assert.ok(putContexts.get('max')!.expiresAt! <= Date.now() + 604_800_000);
 	});
 
 	it('preserves the entry cache lives across the round trip', async () => {

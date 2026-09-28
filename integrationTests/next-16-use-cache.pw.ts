@@ -161,10 +161,13 @@ test('cache lives from cacheLife round-trip into the stored entry', async ({ pag
 	await page.goto(`${harper.httpURL}/cached`);
 	await expect(page.getByTestId('nonce')).not.toHaveText('loading');
 
-	const rows = await searchUseCache(request, harper, ['id', 'revalidate', 'expire', 'stale']);
+	const rows = await searchUseCache(request, harper, ['id', 'timestamp', 'revalidate', 'expire', 'stale', '$expiresAt']);
 	const withLives = rows.find((row: { revalidate?: number }) => typeof row.revalidate === 'number');
 
 	// Without these persisted, the entry reads back as revalidate: 0 and is regenerated on every read.
 	expect(withLives, 'no entry carried its cache lives').toBeTruthy();
 	expect(withLives.expire).toBeGreaterThan(withLives.revalidate);
+	// Harper evicts the row when Next says it expires (cacheLife('hours') is 1 day), not after the
+	// table's 7-day default.
+	expect(withLives.$expiresAt).toBe(withLives.timestamp + withLives.expire * 1000);
 });

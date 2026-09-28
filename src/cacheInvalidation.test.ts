@@ -4,6 +4,7 @@ import assert from 'node:assert';
 import {
 	cacheInvalidations,
 	chunk,
+	entryExpiresAt,
 	hydrateInvalidations,
 	initializeInvalidationSubscription,
 	invalidationFor,
@@ -299,6 +300,22 @@ describe('pruneInvalidations', () => {
 		pruneInvalidations({ tagsManifestModule: null, now: () => 5000 });
 
 		assert.deepEqual([...cacheInvalidations.keys()], ['live']);
+	});
+});
+
+describe('entryExpiresAt', () => {
+	it("expires an entry when Next says it stops being usable", () => {
+		assert.equal(entryExpiresAt({ expirationMS: WEEK_MS }, 1000, 3600, 1000), 1000 + 3_600_000);
+	});
+
+	// The cap is what keeps every entry inside the lifetime its tombstones are sized for.
+	it("caps an entry at the table's expiration", () => {
+		assert.equal(entryExpiresAt({ expirationMS: WEEK_MS }, 1000, 365 * 86_400, 1000), 1000 + WEEK_MS);
+	});
+
+	it('leaves the table default when Next gives no usable expire', () => {
+		assert.equal(entryExpiresAt({ expirationMS: WEEK_MS }, 1000, undefined), undefined);
+		assert.equal(entryExpiresAt({ expirationMS: WEEK_MS }, 1000, 0), undefined);
 	});
 });
 
