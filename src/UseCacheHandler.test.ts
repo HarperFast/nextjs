@@ -72,11 +72,14 @@ function entry(overrides: Partial<UseCacheEntry> = {}): UseCacheEntry {
 }
 
 /**
- * Harper rejects a non-integer for a Long/Int column. Next derives entry timestamps from
- * `performance.timeOrigin + performance.now()`, which is fractional, so a mock that accepts anything
- * hides a write that real Harper refuses outright.
+ * Harper rejects a non-integer for a Long/Int column, and an Int outside the 32-bit range
+ * (harper/resources/Table.ts, "must be an integer (from -2147483648 to 2147483647)"). Next derives
+ * entry timestamps from `performance.timeOrigin + performance.now()`, which is fractional, and its
+ * `default` profile's expire is 0xfffffffe, so a mock that accepts anything hides writes that real
+ * Harper refuses outright.
  */
-const INTEGER_COLUMNS = ['timestamp', 'stale', 'revalidate', 'expire'];
+const LONG_COLUMNS = ['timestamp'];
+const INT_COLUMNS = ['stale', 'revalidate', 'expire'];
 
 /**
  * Harper caps a primary key at MAX_KEY_BYTES = 1978 (harper/resources/Table.ts:146) and
@@ -94,9 +97,11 @@ function enforcePrimaryKey(key: string) {
 }
 
 function enforceSchema(value: Record<string, unknown>) {
-	for (const column of INTEGER_COLUMNS) {
+	for (const column of [...LONG_COLUMNS, ...INT_COLUMNS]) {
 		const columnValue = value[column];
-		if (columnValue !== undefined && columnValue !== null && !Number.isInteger(columnValue)) {
+		if (columnValue === undefined || columnValue === null) continue;
+		const isInt = INT_COLUMNS.includes(column);
+		if (isInt ? (columnValue as number) >> 0 !== columnValue : !Number.isInteger(columnValue)) {
 			throw new Error(`Value ${String(columnValue)} in property ${column} must be an integer`);
 		}
 	}
@@ -246,13 +251,28 @@ describe('UseCacheHandler cache lives', () => {
 		assert.ok(Number.isInteger(result.expire));
 	});
 
-	it("sets the record's Harper expiry from the entry's own expire, capped at the table's", async () => {
+	it("sets the record's Harper expiry from the entry's own expire, past the table's, capped at a year", async () => {
 		const now = Date.now();
 		await handler.set('hours', Promise.resolve(entry({ timestamp: now, expire: 86_400 })));
-		await handler.set('max', Promise.resolve(entry({ timestamp: now, expire: 31_536_000 })));
+		await handler.set('weeks', Promise.resolve(entry({ timestamp: now, revalidate: 604_800, expire: 2_592_000 })));
+		await handler.set('max', Promise.resolve(entry({ timestamp: now, revalidate: 2_592_000, expire: 31_536_000 })));
 
 		assert.equal(putContexts.get('hours')?.expiresAt, now + 86_400_000);
-		assert.ok(putContexts.get('max')!.expiresAt! <= Date.now() + 604_800_000);
+		assert.equal(putContexts.get('weeks')?.expiresAt, now + 2_592_000_000, 'not cut to the 7-day table TTL');
+		assert.ok(putContexts.get('max')!.expiresAt! <= Date.now() + 31_536_000_000);
+	});
+
+	// Next's `default` profile. Stored as-is, Harper refuses the write and the entry never lands.
+	it('stores an entry whose expire is INFINITE_CACHE, bounded to a year', async () => {
+		const now = Date.now();
+		await handler.set('default', Promise.resolve(entry({ timestamp: now, revalidate: 900, expire: 0xfffffffe })));
+
+		const result = await handler.get('default', []);
+
+		assert.ok(result, 'the write was not refused');
+		assert.equal(result.expire, 31_536_000);
+		assert.equal(result.revalidate, 900);
+		assert.ok(putContexts.get('default')!.expiresAt! <= Date.now() + 31_536_000_000);
 	});
 
 	it('preserves the entry cache lives across the round trip', async () => {

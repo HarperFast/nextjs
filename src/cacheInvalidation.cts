@@ -8,6 +8,13 @@ const INVALIDATION_TABLE = 'nextjs_cache_invalidation';
 // Matches the `expiration` of the cache tables in schema.graphql; used when a table does not report its own.
 const DEFAULT_CACHE_TTL_MS = 604_800_000;
 
+// The longest an entry is kept, whatever Next asks for: one year, which is Next's own `max` profile. It is
+// independent of the tables' `expiration`, which only applies to an entry written without an `expire` —
+// Harper honours a record's own `expiresAt` beyond it. Tombstones are sized from it, so raising it makes
+// every tombstone, and the in-memory map of them, live that much longer.
+export const MAX_ENTRY_LIFETIME_MS = 31_536_000_000;
+const MAX_ENTRY_LIFETIME_SECONDS = MAX_ENTRY_LIFETIME_MS / 1000;
+
 // Covers an entry that was rendered before an invalidation but stored after it, and replication lag: both
 // let an entry's own TTL start after the invalidation was issued.
 const TOMBSTONE_MARGIN_MS = 3_600_000;
@@ -142,31 +149,40 @@ let unboundedCacheReported = false;
 
 /**
  * Harper's per-record expiry for a cache entry: when Next says it stops being usable (`expire` seconds
- * after `writtenAt`), capped at the table's `expiration`. The cap is what `tombstoneLifetimeMs` relies
- * on — no entry may outlive the tombstones that can invalidate it — so the handlers set it explicitly
- * rather than leave the record's lifetime to whatever a write's context happens to carry. Undefined
- * leaves the table default in place.
+ * after `writtenAt`), capped at `MAX_ENTRY_LIFETIME_MS` from now. The cap is what `tombstoneLifetimeMs`
+ * relies on — no entry may outlive the tombstones that can invalidate it — so the handlers set it
+ * explicitly rather than leave the record's lifetime to whatever a write's context happens to carry.
+ * Undefined leaves the table default in place.
  */
 export function entryExpiresAt(
-	table: { expirationMS?: number } | undefined,
 	writtenAt: number,
 	expireSeconds: number | undefined,
 	now: number = Date.now()
 ): number | undefined {
 	if (typeof expireSeconds !== 'number' || !Number.isFinite(expireSeconds) || expireSeconds <= 0) return undefined;
-	const ttl = table?.expirationMS;
-	const expiresAt = writtenAt + expireSeconds * 1000;
-	return typeof ttl === 'number' && ttl > 0 ? Math.min(expiresAt, now + ttl) : expiresAt;
+	return Math.min(writtenAt + expireSeconds * 1000, now + MAX_ENTRY_LIFETIME_MS);
+}
+
+/**
+ * A cache life (`stale`, `revalidate`, `expire`, in seconds) as it can be stored. Harper rejects a
+ * non-integer, or one outside the 32-bit range, for an Int column, and the rejection is caught — so the
+ * entry silently never lands. Next's `default` profile sets `expire` to `INFINITE_CACHE` (0xfffffffe),
+ * which is out of range; no entry is kept past `MAX_ENTRY_LIFETIME_MS` anyway, so longer lives are stored
+ * as that.
+ */
+export function toStoredLife(seconds: number | undefined): number | undefined {
+	if (typeof seconds !== 'number' || Number.isNaN(seconds)) return undefined;
+	return Math.max(0, Math.min(Math.floor(seconds), MAX_ENTRY_LIFETIME_SECONDS));
 }
 
 /**
  * How long a tombstone must live: past the last moment any entry written before the invalidation can
- * still be read. Entries expire at most their table's `expiration` after their last write (see
- * `entryExpiresAt`), so that bound is the longer of the two cache tables' TTLs plus the margin.
+ * still be read. An entry with an `expire` lives at most `MAX_ENTRY_LIFETIME_MS` (see `entryExpiresAt`);
+ * one without lives its table's `expiration`. The bound is the longest of those, plus the margin.
  */
 export function tombstoneLifetimeMs(deps: InvalidationDeps = {}): number {
 	const scope = getScope(deps);
-	let longest = 0;
+	let longest = MAX_ENTRY_LIFETIME_MS;
 	for (const name of [ISR_TABLE, USE_CACHE_TABLE]) {
 		const ttl = (scope?.[name] as { expirationMS?: number } | undefined)?.expirationMS;
 		if (ttl === undefined) {
@@ -180,7 +196,7 @@ export function tombstoneLifetimeMs(deps: InvalidationDeps = {}): number {
 			);
 		}
 	}
-	return (longest || DEFAULT_CACHE_TTL_MS) + TOMBSTONE_MARGIN_MS;
+	return longest + TOMBSTONE_MARGIN_MS;
 }
 
 /**

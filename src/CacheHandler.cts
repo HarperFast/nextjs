@@ -20,6 +20,7 @@ import {
 	nextServesStaleTags,
 	recordInvalidation,
 	tagState,
+	toStoredLife,
 } from './cacheInvalidation.cjs';
 
 const NEXT_CACHE_TAGS_HEADER = 'x-next-cache-tags';
@@ -138,14 +139,14 @@ export default class HarperCacheHandler implements CacheHandler {
 		const table = databases.harperfast_nextjs.nextjs_isr_cache;
 		const tags = extractTags(data, ctx);
 
-		// Persisted so the entry's own `expire` is enforced on every node. Floored because Harper rejects a
-		// non-integer for an Int column, and a rejected write here is silent — the entry simply never lands.
+		// Persisted so the entry's own `expire` is enforced on every node. See `toStoredLife` for why the
+		// values are bounded: a rejected write here is silent — the entry simply never lands.
 		const cacheControl = 'cacheControl' in ctx ? ctx.cacheControl : undefined;
-		const revalidate = typeof cacheControl?.revalidate === 'number' ? Math.floor(cacheControl.revalidate) : undefined;
-		const expire = typeof cacheControl?.expire === 'number' ? Math.floor(cacheControl.expire) : undefined;
+		const revalidate = toStoredLife(typeof cacheControl?.revalidate === 'number' ? cacheControl.revalidate : undefined);
+		const expire = toStoredLife(cacheControl?.expire);
 
 		const now = Date.now();
-		const expiresAt = entryExpiresAt(table as { expirationMS?: number }, now, expire, now);
+		const expiresAt = entryExpiresAt(now, expire, now);
 		await table.put(key, { data, tags, revalidate, expire }, expiresAt === undefined ? undefined : ({ expiresAt } as never));
 	}
 

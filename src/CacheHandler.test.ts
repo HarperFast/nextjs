@@ -112,18 +112,20 @@ describe('HarperCacheHandler per-entry cache lives', () => {
 		assert.equal(puts[0].value.expire, 3600);
 	});
 
-	it("sets the record's Harper expiry from Next's expire, capped at the table's", async () => {
+	it("sets the record's Harper expiry from Next's expire, capped at a year", async () => {
 		const { puts } = installDatabases();
 		const handler = new HarperCacheHandler();
 		const before = Date.now();
 
 		await handler.set('/short', appPage([]) as never, { cacheControl: { revalidate: 60, expire: 3600 } } as never);
-		await handler.set('/long', appPage([]) as never, { cacheControl: { revalidate: 60, expire: 31_536_000 } } as never);
+		await handler.set('/long', appPage([]) as never, { cacheControl: { revalidate: 60, expire: 0xfffffffe } } as never);
 		await handler.set('/none', appPage([]) as never, { cacheControl: { revalidate: 60 } } as never);
 
 		const [short, long, none] = puts.map((put) => put.context?.expiresAt);
 		assert.ok(short! >= before + 3_600_000 && short! <= Date.now() + 3_600_000);
-		assert.ok(long! <= Date.now() + 604_800_000, 'no entry may outlive the table TTL its tombstones are sized for');
+		assert.ok(long! > Date.now() + 604_800_000, 'not cut to the 7-day table TTL');
+		assert.ok(long! <= Date.now() + 31_536_000_000, 'no entry may outlive the year its tombstones are sized for');
+		assert.equal(puts[1].value.expire, 31_536_000, 'bounded to fit the Int column');
 		assert.equal(none, undefined);
 	});
 

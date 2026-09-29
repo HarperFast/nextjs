@@ -9,6 +9,7 @@ import {
 	passedExpiration,
 	recordInvalidation,
 	tagState,
+	toStoredLife,
 } from './cacheInvalidation.cjs';
 
 const DATABASE = 'harperfast_nextjs';
@@ -26,7 +27,6 @@ interface StoredEntry {
 interface UseCacheTable {
 	get(key: string): Promise<StoredEntry | undefined>;
 	put(key: string, value: Record<string, unknown>, context?: { expiresAt: number }): Promise<unknown> | unknown;
-	expirationMS?: number;
 }
 
 /**
@@ -165,9 +165,9 @@ async function openValue(value: unknown): Promise<ReadableStream<Uint8Array> | u
 
 /**
  * Next derives entry timestamps from `performance.timeOrigin + performance.now()`, which is
- * fractional, and cache lives can arrive fractional too. Harper rejects a non-integer for a Long/Int
- * column, so an uncoerced write is refused outright — and, being caught, looks like a working cache
- * that simply never stored anything.
+ * fractional. Harper rejects a non-integer for a Long column, so an uncoerced write is refused
+ * outright — and, being caught, looks like a working cache that simply never stored anything. Cache
+ * lives go through `toStoredLife`, which also bounds them.
  */
 function toInteger(value: number | undefined): number | undefined {
 	return typeof value === 'number' && Number.isFinite(value) ? Math.floor(value) : undefined;
@@ -245,8 +245,8 @@ class HarperUseCacheHandler implements CacheHandler {
 
 			const storageKey = toStorageKey(cacheKey);
 			const timestamp = toInteger(entry.timestamp) ?? Date.now();
-			const expire = toInteger(entry.expire);
-			const expiresAt = entryExpiresAt(table, timestamp, expire);
+			const expire = toStoredLife(entry.expire);
+			const expiresAt = entryExpiresAt(timestamp, expire);
 			await table.put(
 				storageKey,
 				{
@@ -255,8 +255,8 @@ class HarperUseCacheHandler implements CacheHandler {
 					value: toStoredValue(bytes),
 					tags: entry.tags ?? [],
 					timestamp,
-					stale: toInteger(entry.stale),
-					revalidate: toInteger(entry.revalidate),
+					stale: toStoredLife(entry.stale),
+					revalidate: toStoredLife(entry.revalidate),
 					expire,
 				},
 				expiresAt === undefined ? undefined : { expiresAt }

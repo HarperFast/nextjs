@@ -18,12 +18,14 @@ import {
 	tagState,
 	tombstoneLifetimeMs,
 	tombstoneToInvalidation,
+	toStoredLife,
 	type InvalidationDeps,
 	type TagInvalidation,
 } from './cacheInvalidation.cjs';
 
 const DAY_MS = 86_400_000;
 const WEEK_MS = 7 * DAY_MS;
+const YEAR_MS = 365 * DAY_MS;
 const MARGIN_MS = 3_600_000;
 
 function invalidation(fields: Partial<TagInvalidation> & { at: number }): TagInvalidation {
@@ -305,26 +307,60 @@ describe('pruneInvalidations', () => {
 
 describe('entryExpiresAt', () => {
 	it("expires an entry when Next says it stops being usable", () => {
-		assert.equal(entryExpiresAt({ expirationMS: WEEK_MS }, 1000, 3600, 1000), 1000 + 3_600_000);
+		assert.equal(entryExpiresAt(1000, 3600, 1000), 1000 + 3_600_000);
+	});
+
+	// Past the 7-day table TTL, so the `weeks` and `max` profiles keep their stale-while-revalidate window.
+	it("keeps an entry past the table's expiration", () => {
+		assert.equal(entryExpiresAt(1000, 30 * 86_400, 1000), 1000 + 30 * DAY_MS);
 	});
 
 	// The cap is what keeps every entry inside the lifetime its tombstones are sized for.
-	it("caps an entry at the table's expiration", () => {
-		assert.equal(entryExpiresAt({ expirationMS: WEEK_MS }, 1000, 365 * 86_400, 1000), 1000 + WEEK_MS);
+	it('caps an entry at a year', () => {
+		assert.equal(entryExpiresAt(1000, 0xfffffffe, 1000), 1000 + YEAR_MS);
 	});
 
 	it('leaves the table default when Next gives no usable expire', () => {
-		assert.equal(entryExpiresAt({ expirationMS: WEEK_MS }, 1000, undefined), undefined);
-		assert.equal(entryExpiresAt({ expirationMS: WEEK_MS }, 1000, 0), undefined);
+		assert.equal(entryExpiresAt(1000, undefined), undefined);
+		assert.equal(entryExpiresAt(1000, 0), undefined);
+	});
+});
+
+describe('toStoredLife', () => {
+	it('floors a fractional life', () => {
+		assert.equal(toStoredLife(900.7), 900);
+	});
+
+	// Next's INFINITE_CACHE (0xfffffffe) does not fit Harper's 32-bit Int column.
+	it('bounds a life to a year, which fits an Int column', () => {
+		assert.equal(toStoredLife(0xfffffffe), 31_536_000);
+		assert.equal(toStoredLife(Infinity), 31_536_000);
+		assert.ok(toStoredLife(0xfffffffe)! <= 2_147_483_647);
+	});
+
+	it('never stores a negative life', () => {
+		assert.equal(toStoredLife(-Infinity), 0);
+		assert.equal(toStoredLife(-5), 0);
+	});
+
+	it('stores nothing for a missing life', () => {
+		assert.equal(toStoredLife(undefined), undefined);
+		assert.equal(toStoredLife(NaN), undefined);
 	});
 });
 
 describe('tombstoneLifetimeMs', () => {
 	beforeEach(() => resetInvalidationStateForTesting());
 
-	it('outlives the longer of the two cache tables by the margin', () => {
+	it('outlives the longest an entry is kept, by the margin', () => {
 		const deps = makeDeps({ isr: makeCacheTable([], 2 * DAY_MS), useCache: makeCacheTable([], 9 * DAY_MS) });
-		assert.equal(tombstoneLifetimeMs(deps), 9 * DAY_MS + MARGIN_MS);
+		assert.equal(tombstoneLifetimeMs(deps), YEAR_MS + MARGIN_MS);
+	});
+
+	// A row written without an expire lives the table's expiration, which may be set longer than the cap.
+	it('outlives a cache table whose expiration is longer than a year', () => {
+		const deps = makeDeps({ useCache: makeCacheTable([], 2 * YEAR_MS) });
+		assert.equal(tombstoneLifetimeMs(deps), 2 * YEAR_MS + MARGIN_MS);
 	});
 
 	it('reports once when a cache table has no expiration, since nothing can then bound a tombstone', () => {
@@ -348,7 +384,7 @@ describe('recordInvalidation', () => {
 		const [put] = invalidationTable.puts;
 		assert.equal(put.value.timestamp, 1_000_000);
 		assert.equal(put.value.expired, 1_000_000);
-		assert.equal(put.value.lapsesAt, 1_000_000 + WEEK_MS + MARGIN_MS);
+		assert.equal(put.value.lapsesAt, 1_000_000 + YEAR_MS + MARGIN_MS);
 		assert.equal(put.context?.expiresAt, put.value.lapsesAt, 'the per-record expiry is what outlasts the table TTL');
 		assert.ok(cacheInvalidations.has('products'), 'this worker sees it before the write returns');
 	});
@@ -374,7 +410,7 @@ describe('recordInvalidation', () => {
 			timestamp: 2000,
 			stale: 1000,
 			expired: 2000,
-			lapsesAt: 2000 + WEEK_MS + MARGIN_MS,
+			lapsesAt: 2000 + YEAR_MS + MARGIN_MS,
 		});
 	});
 
