@@ -107,6 +107,7 @@ test('ISR cache record is updated after revalidation', async ({ request, harper 
 		headers: { 'Content-Type': 'application/json', 'Authorization': authHeader },
 		data: queryPayload,
 	});
+	expect(before.status()).toBe(200);
 	const beforeRecords = await before.json();
 	expect(beforeRecords).toHaveLength(1);
 	const [beforeRecord] = beforeRecords;
@@ -125,6 +126,7 @@ test('ISR cache record is updated after revalidation', async ({ request, harper 
 		headers: { 'Content-Type': 'application/json', 'Authorization': authHeader },
 		data: queryPayload,
 	});
+	expect(after.status()).toBe(200);
 	const afterRecords = await after.json();
 	expect(afterRecords).toHaveLength(1);
 	const [afterRecord] = afterRecords;
