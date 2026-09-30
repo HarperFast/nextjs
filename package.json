@@ -65,8 +65,8 @@
 		"@types/node": "^26",
 		"harper": "5.1.23",
 		"next-14": "npm:next@14.2.35",
-		"next-15": "npm:next@15.5.15",
-		"next-16": "npm:next@16.2.4",
+		"next-15": "npm:next@15.5.24",
+		"next-16": "npm:next@16.3.3",
 		"typescript": "6.0.3"
 	},
 	"peerDependencies": {
