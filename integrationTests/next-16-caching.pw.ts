@@ -55,18 +55,20 @@ test('ISR cache record is persisted in Harper', async ({ request, harper }) => {
 	await request.get(`${harper.httpURL}/isr`);
 
 	// Query the Harper Operations API to inspect the nextjs_isr_cache table.
-	// The key Next.js uses for app-router pages is the route path (e.g. "/isr").
+	// Next.js's cache key for the /isr route is not necessarily the route path
+	// itself — e.g. Next 16.3.8 keys app-router pages as
+	// "/route-cache/APP_PAGE/<hash>/$/isr" while 16.3.7 keys them as "/isr".
+	// Match on the key ending in "/isr" instead of assuming an exact value.
 	const response = await request.post(harper.operationsAPIURL, {
 		headers: {
 			'Content-Type': 'application/json',
 			'Authorization': `Basic ${Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString('base64')}`,
 		},
 		data: {
-			operation: 'search_by_value',
+			operation: 'search_by_conditions',
 			database: 'harperfast_nextjs',
 			table: 'nextjs_isr_cache',
-			search_attribute: 'id',
-			search_value: '/isr',
+			conditions: [{ search_attribute: 'id', search_type: 'ends_with', search_value: '/isr' }],
 			get_attributes: ['id', 'lastModified'],
 		},
 	});
@@ -77,7 +79,7 @@ test('ISR cache record is persisted in Harper', async ({ request, harper }) => {
 	expect(records).toHaveLength(1);
 
 	const record = records[0];
-	expect(record.id).toBe('/isr');
+	expect(record.id).toMatch(/\/isr$/);
 	// lastModified should be a recent Unix timestamp in milliseconds.
 	expect(typeof record.lastModified).toBe('number');
 	expect(record.lastModified).toBeGreaterThan(Date.now() - 60_000);
@@ -90,14 +92,14 @@ test('ISR cache record is updated after revalidation', async ({ request, harper 
 	await request.get(isrURL);
 	await request.get(isrURL);
 
-	// Capture the initial lastModified timestamp from the DB.
+	// Capture the initial lastModified timestamp from the DB (see the note
+	// on the cache key format in the previous test).
 	const authHeader = `Basic ${Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString('base64')}`;
 	const queryPayload = {
-		operation: 'search_by_value',
+		operation: 'search_by_conditions',
 		database: 'harperfast_nextjs',
 		table: 'nextjs_isr_cache',
-		search_attribute: 'id',
-		search_value: '/isr',
+		conditions: [{ search_attribute: 'id', search_type: 'ends_with', search_value: '/isr' }],
 		get_attributes: ['id', 'lastModified'],
 	};
 
@@ -105,7 +107,9 @@ test('ISR cache record is updated after revalidation', async ({ request, harper 
 		headers: { 'Content-Type': 'application/json', 'Authorization': authHeader },
 		data: queryPayload,
 	});
-	const [beforeRecord] = await before.json();
+	const beforeRecords = await before.json();
+	expect(beforeRecords).toHaveLength(1);
+	const [beforeRecord] = beforeRecords;
 	const lastModifiedBefore: number = beforeRecord.lastModified;
 
 	// Wait past the revalidation window and trigger a stale response (which
@@ -121,9 +125,13 @@ test('ISR cache record is updated after revalidation', async ({ request, harper 
 		headers: { 'Content-Type': 'application/json', 'Authorization': authHeader },
 		data: queryPayload,
 	});
-	const [afterRecord] = await after.json();
+	const afterRecords = await after.json();
+	expect(afterRecords).toHaveLength(1);
+	const [afterRecord] = afterRecords;
 	const lastModifiedAfter: number = afterRecord.lastModified;
 
+	// Same logical cache entry, not a different row that happens to also match.
+	expect(afterRecord.id).toBe(beforeRecord.id);
 	// The record's lastModified timestamp must have advanced.
 	expect(lastModifiedAfter).toBeGreaterThan(lastModifiedBefore);
 });
