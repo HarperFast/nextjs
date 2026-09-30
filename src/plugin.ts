@@ -394,12 +394,46 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 
 	const requestHandler = app.getRequestHandler();
 
+	let warnedMissingNodeAdapter = false;
+
 	scope.server?.http?.(
 		(request, next) => {
-			return request._nodeResponse === undefined
-				? next(request)
-				: // @ts-expect-error - Not sure when the IncomingMessage.url could be undefined ; need to dig into it.
-					requestHandler(request._nodeRequest, request._nodeResponse, urlParse(request._nodeRequest.url, true));
+			// `== null`, not `=== undefined`: Harper's Bun and uWS requests carry a null `_nodeResponse`,
+			// and neither implements the Node adapter used below.
+			if (request._nodeResponse == null) return next(request);
+			// Harper's router strips an application's urlPath mount by proxying the Harper `Request`, so the
+			// Node request underneath it still carries the un-stripped URL. Only a request middleware
+			// rewrote needs the adapter, which presents the Request's method/url/headers over that Node
+			// request; everything else keeps the cheaper direct hand-off.
+			if (request.url !== request._nodeRequest.url) {
+				if (typeof request.withNodeAdapter === 'function') {
+					return request
+						.withNodeAdapter((nodeRequest, nodeResponse) =>
+							// @ts-expect-error - Not sure when the IncomingMessage.url could be undefined ; need to dig into it.
+							requestHandler(nodeRequest, nodeResponse, urlParse(nodeRequest.url, true))
+						)
+						.then((response) => {
+							// Required by withNodeAdapter: a connection reset after the headers are sent destroys
+							// this stream with an error, which Node throws as an uncaught exception without a
+							// listener. Harper's own pipe already warns about the error, so this only has to
+							// exist, not report.
+							response.body.on('error', (error) =>
+								scope.logger.debug?.(`Next.js response stream error for ${request.pathname}: `, error)
+							);
+							return response;
+						});
+				}
+				if (!warnedMissingNodeAdapter) {
+					warnedMissingNodeAdapter = true;
+					scope.logger.warn?.(
+						'This version of Harper does not provide Request.withNodeAdapter, so Next.js receives the URL as it ' +
+							`arrived rather than the ${request.pathname} Harper resolved it to. An application mounted at a ` +
+							'urlPath will not route correctly; upgrade Harper or serve the application at the root.'
+					);
+				}
+			}
+			// @ts-expect-error - Not sure when the IncomingMessage.url could be undefined ; need to dig into it.
+			return requestHandler(request._nodeRequest, request._nodeResponse, urlParse(request._nodeRequest.url, true));
 		},
 		{ runFirst: config.runFirst, port: config.port, securePort: config.securePort }
 	);
