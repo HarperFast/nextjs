@@ -13,22 +13,16 @@ function authHeader(harper: HarperContext): string {
 	return `Basic ${Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString('base64')}`;
 }
 
-/**
- * Response-cache keys are opaque to cache handlers, and their shape changes between Next.js
- * releases. Up to 16.3.7 the handler received the normalized pathname ("/isr"); 16.3.8 namespaces
- * it by the owning route as `/route-cache/<RouteKind>/<sha256(sourceRoute)>/$<pathname>` — see
- * `getRouteCacheKey` in next/dist/server/lib/route-cache-key. Match on the pathname the key ends
- * with so these tests assert what we actually care about (the route's entry is persisted) rather
- * than pinning a Next.js internal.
- */
+// Next.js response-cache keys are opaque and their shape changes between releases, so match the
+// trailing `/$<pathname>` rather than the whole key. Both arms compare against Next's
+// `normalizePagePath`, which maps `/` to `/index`; the bare form is the pre-16.3.8 key.
 function isCacheKeyForRoute(id: string, pathname: string): boolean {
-	return id === pathname || id.endsWith(`/$${pathname}`);
+	const normalized = pathname === '/' ? '/index' : pathname;
+	return id === normalized || id.endsWith(`/$${normalized}`);
 }
 
-/**
- * Every row in nextjs_isr_cache whose key belongs to `pathname`. `search_value: '*'` is a full
- * scan — the fixture app only ever caches a handful of routes.
- */
+// `search_value: '*'` is an unconditional full scan. The table also holds `unstable_cache` fetch
+// rows and every other cached route, so callers must filter.
 async function getISRCacheRecords(
 	request: APIRequestContext,
 	harper: HarperContext,
@@ -157,8 +151,7 @@ test('revalidateTag writes invalidation row and forces regeneration', async ({ r
 	const revalidateResponse = await request.post(revalidateURL);
 	expect(revalidateResponse.status()).toBe(200);
 
-	// The invalidation row should now exist in Harper. This table is keyed by the
-	// tag itself, which is ours — not a Next.js cache key — so match it exactly.
+	// nextjs_cache_invalidation is keyed by the tag itself, so an exact match is correct here.
 	const invalidationRow = await request.post(harper.operationsAPIURL, {
 		headers: { 'Content-Type': 'application/json', 'Authorization': authHeader(harper) },
 		data: {
