@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 
 import { withBuildLock } from './buildLock.js';
+import { OLD_BUILD_SWEEP_DELAY_MS, oldBuildSweepEnabled, sweepOtherBuilds } from './buildSweep.js';
 
 import type NextModule14 from 'next-14';
 import type NextBuildModule14 from 'next-14/dist/cli/next-build.d.ts';
@@ -272,8 +273,32 @@ export async function handleApplication(scope: Scope) {
 		}
 	}
 
+	// Opt-in (see oldBuildSweepEnabled). `next dev` has no BUILD_ID, and its entries are not a build's to clear.
+	if (!config.dev && oldBuildSweepEnabled()) scheduleOldBuildSweep(scope);
+
 	// Finally, serve the application
 	await serve(scope, config, next);
+}
+
+type WorkerServer = { workerIndex?: number } | undefined;
+
+/**
+ * Clear out "use cache" entries left by earlier builds (see sweepOtherBuilds), once per node — on worker
+ * 0 — and only after a rolling restart has had time to reach the other nodes. Where the worker index is
+ * not exposed every worker sweeps: repeated work, but deleting an already-deleted entry is harmless.
+ */
+function scheduleOldBuildSweep(scope: Scope) {
+	const buildId = getBuildId(scope);
+	if (buildId === null) return;
+	const workerIndex =
+		(harper as unknown as { server?: WorkerServer }).server?.workerIndex ??
+		(globalThis as { server?: WorkerServer }).server?.workerIndex;
+	if (workerIndex !== undefined && workerIndex !== 0) return;
+	setTimeout(() => {
+		sweepOtherBuilds(buildId).catch((error) => {
+			scope.logger.error?.('Failed to delete "use cache" entries from earlier builds; they are left to expire: ', error);
+		});
+	}, OLD_BUILD_SWEEP_DELAY_MS).unref();
 }
 
 async function build(scope: Scope, config: NextPluginConfig, next: NextPackage) {

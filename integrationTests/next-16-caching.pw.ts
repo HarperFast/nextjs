@@ -133,7 +133,7 @@ test('ISR cache record is updated after revalidation', async ({ request, harper 
 	expect(after[0].lastModified).toBeGreaterThan(lastModifiedBefore);
 });
 
-test('revalidateTag writes invalidation row and forces regeneration', async ({ request, harper, page }) => {
+test('revalidateTag records the invalidation and regenerates the entry', async ({ request, harper, page }) => {
 	const taggedURL = `${harper.httpURL}/tagged`;
 	const revalidateURL = `${harper.httpURL}/api/revalidate?tag=test-tag`;
 
@@ -150,8 +150,10 @@ test('revalidateTag writes invalidation row and forces regeneration', async ({ r
 	const revalidateResponse = await request.post(revalidateURL);
 	expect(revalidateResponse.status()).toBe(200);
 
+	// The tombstone is what every worker and node compares entries against, so it must outlive every
+	// entry it invalidates — those live at most the table's 7 days from their last write.
 	// nextjs_cache_invalidation is keyed by the tag itself, so an exact match is correct here.
-	const invalidationRow = await request.post(harper.operationsAPIURL, {
+	const tombstones = await request.post(harper.operationsAPIURL, {
 		headers: { 'Content-Type': 'application/json', 'Authorization': authHeader(harper) },
 		data: {
 			operation: 'search_by_value',
@@ -159,16 +161,51 @@ test('revalidateTag writes invalidation row and forces regeneration', async ({ r
 			table: 'nextjs_cache_invalidation',
 			search_attribute: 'id',
 			search_value: 'test-tag',
-			get_attributes: ['id', 'timestamp'],
+			get_attributes: ['id', 'timestamp', 'expired', 'lapsesAt'],
 		},
 	});
-	const rows = await invalidationRow.json();
-	expect(rows).toHaveLength(1);
-	expect(rows[0].id).toBe('test-tag');
-	expect(typeof rows[0].timestamp).toBe('number');
+	const [tombstone] = await tombstones.json();
+	expect(tombstone, 'the invalidation left no tombstone').toBeTruthy();
+	expect(tombstone.expired).toBe(tombstone.timestamp);
+	expect(tombstone.lapsesAt).toBeGreaterThan(tombstone.timestamp + 604_800_000);
 
-	// Next page request must regenerate (new nonce).
+	// revalidateTag(tag) with no profile expires the tag, so the entry is regenerated. Polled because the
+	// next request can land on a worker the replicated tombstone has not reached yet.
+	await expect(async () => {
+		await page.goto(taggedURL);
+		expect(await page.getByTestId('nonce').innerText()).not.toBe(nonceBefore);
+	}).toPass({ timeout: 15_000 });
+});
+
+// revalidateTag(tag, 'max'): stale now, expired a year out. Next 16 serves the page stale while it
+// regenerates, and the regenerated page is a HIT again — rather than the pre-fix behaviour, where the
+// expiry was stored as the stale time and every entry stayed stale (or, for fetches, missing) for a year.
+test('revalidateTag with a profile serves the page stale, then a fresh HIT', async ({ request, harper, page }) => {
+	const taggedURL = `${harper.httpURL}/tagged`;
+
 	await page.goto(taggedURL);
-	const nonceAfter = await page.getByTestId('nonce').innerText();
-	expect(nonceAfter).not.toBe(nonceBefore);
+	const warmed = await page.goto(taggedURL);
+	expect(warmed!.headers()['x-nextjs-cache']).toBe('HIT');
+	const nonceBefore = await page.getByTestId('nonce').innerText();
+
+	const revalidateResponse = await request.post(`${harper.httpURL}/api/revalidate?tag=test-tag&profile=max`);
+	expect(revalidateResponse.status()).toBe(200);
+
+	// Served stale, not expired: somewhere before the new content appears, the old page is served with a
+	// STALE header rather than blocking on a render.
+	let servedStale = false;
+	let regenerated = '';
+	await expect(async () => {
+		const response = await page.goto(taggedURL);
+		regenerated = await page.getByTestId('nonce').innerText();
+		if (response!.headers()['x-nextjs-cache'] === 'STALE' && regenerated === nonceBefore) servedStale = true;
+		expect(regenerated).not.toBe(nonceBefore);
+	}).toPass({ timeout: 15_000 });
+	expect(servedStale, 'the page was never served stale while it regenerated').toBe(true);
+
+	await expect(async () => {
+		const response = await page.goto(taggedURL);
+		expect(response!.headers()['x-nextjs-cache']).toBe('HIT');
+		expect(await page.getByTestId('nonce').innerText()).toBe(regenerated);
+	}).toPass({ timeout: 15_000 });
 });
