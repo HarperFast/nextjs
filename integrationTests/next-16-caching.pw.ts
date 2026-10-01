@@ -1,6 +1,49 @@
+import type { APIRequestContext } from '@playwright/test';
+import type { HarperContext } from '@harperfast/integration-testing';
 import { fixture } from './fixture.ts';
 
 const { test, expect } = fixture('next-16-caching');
+
+interface ISRCacheRecord {
+	id: string;
+	lastModified: number;
+}
+
+function authHeader(harper: HarperContext): string {
+	return `Basic ${Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString('base64')}`;
+}
+
+// Next.js response-cache keys are opaque: a route's row is the one whose key is, or ends with
+// `/$` plus, the pathname in `normalizePagePath` form (`/` becomes `/index`).
+function isCacheKeyForRoute(id: string, pathname: string): boolean {
+	const normalized = pathname === '/' ? '/index' : pathname;
+	return id === normalized || id.endsWith(`/$${normalized}`);
+}
+
+// `search_value: '*'` is an unconditional full scan. The table also holds `unstable_cache` fetch
+// rows and every other cached route, so callers must filter.
+async function getISRCacheRecords(
+	request: APIRequestContext,
+	harper: HarperContext,
+	pathname: string
+): Promise<ISRCacheRecord[]> {
+	const response = await request.post(harper.operationsAPIURL, {
+		headers: { 'Content-Type': 'application/json', 'Authorization': authHeader(harper) },
+		data: {
+			operation: 'search_by_value',
+			database: 'harperfast_nextjs',
+			table: 'nextjs_isr_cache',
+			search_attribute: 'id',
+			search_value: '*',
+			get_attributes: ['id', 'lastModified'],
+		},
+	});
+
+	expect(response.status()).toBe(200);
+
+	const records: ISRCacheRecord[] = await response.json();
+	return records.filter((record) => isCacheKeyForRoute(record.id, pathname));
+}
 
 test('ISR page serves cached response and revalidates after expiry', async ({ page, harper }) => {
 	const url = `${harper.httpURL}/isr`;
@@ -54,33 +97,12 @@ test('ISR cache record is persisted in Harper', async ({ request, harper }) => {
 	// Second request ensures the cache is populated (first may be a build-time miss).
 	await request.get(`${harper.httpURL}/isr`);
 
-	// Query the Harper Operations API to inspect the nextjs_isr_cache table.
-	// The key Next.js uses for app-router pages is the route path (e.g. "/isr").
-	const response = await request.post(harper.operationsAPIURL, {
-		headers: {
-			'Content-Type': 'application/json',
-			'Authorization': `Basic ${Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString('base64')}`,
-		},
-		data: {
-			operation: 'search_by_value',
-			database: 'harperfast_nextjs',
-			table: 'nextjs_isr_cache',
-			search_attribute: 'id',
-			search_value: '/isr',
-			get_attributes: ['id', 'lastModified'],
-		},
-	});
-
-	expect(response.status()).toBe(200);
-
-	const records = await response.json();
+	const records = await getISRCacheRecords(request, harper, '/isr');
 	expect(records).toHaveLength(1);
 
-	const record = records[0];
-	expect(record.id).toBe('/isr');
 	// lastModified should be a recent Unix timestamp in milliseconds.
-	expect(typeof record.lastModified).toBe('number');
-	expect(record.lastModified).toBeGreaterThan(Date.now() - 60_000);
+	expect(typeof records[0].lastModified).toBe('number');
+	expect(records[0].lastModified).toBeGreaterThan(Date.now() - 60_000);
 });
 
 test('ISR cache record is updated after revalidation', async ({ request, harper }) => {
@@ -91,22 +113,9 @@ test('ISR cache record is updated after revalidation', async ({ request, harper 
 	await request.get(isrURL);
 
 	// Capture the initial lastModified timestamp from the DB.
-	const authHeader = `Basic ${Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString('base64')}`;
-	const queryPayload = {
-		operation: 'search_by_value',
-		database: 'harperfast_nextjs',
-		table: 'nextjs_isr_cache',
-		search_attribute: 'id',
-		search_value: '/isr',
-		get_attributes: ['id', 'lastModified'],
-	};
-
-	const before = await request.post(harper.operationsAPIURL, {
-		headers: { 'Content-Type': 'application/json', 'Authorization': authHeader },
-		data: queryPayload,
-	});
-	const [beforeRecord] = await before.json();
-	const lastModifiedBefore: number = beforeRecord.lastModified;
+	const before = await getISRCacheRecords(request, harper, '/isr');
+	expect(before).toHaveLength(1);
+	const lastModifiedBefore = before[0].lastModified;
 
 	// Wait past the revalidation window and trigger a stale response (which
 	// kicks off background regeneration).
@@ -117,21 +126,16 @@ test('ISR cache record is updated after revalidation', async ({ request, harper 
 	await new Promise((resolve) => setTimeout(resolve, 500));
 
 	// Query again.
-	const after = await request.post(harper.operationsAPIURL, {
-		headers: { 'Content-Type': 'application/json', 'Authorization': authHeader },
-		data: queryPayload,
-	});
-	const [afterRecord] = await after.json();
-	const lastModifiedAfter: number = afterRecord.lastModified;
+	const after = await getISRCacheRecords(request, harper, '/isr');
+	expect(after).toHaveLength(1);
 
 	// The record's lastModified timestamp must have advanced.
-	expect(lastModifiedAfter).toBeGreaterThan(lastModifiedBefore);
+	expect(after[0].lastModified).toBeGreaterThan(lastModifiedBefore);
 });
 
 test('revalidateTag records the invalidation and regenerates the entry', async ({ request, harper, page }) => {
 	const taggedURL = `${harper.httpURL}/tagged`;
 	const revalidateURL = `${harper.httpURL}/api/revalidate?tag=test-tag`;
-	const authHeader = `Basic ${Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString('base64')}`;
 
 	// Warm the cache.
 	await page.goto(taggedURL);
@@ -148,8 +152,9 @@ test('revalidateTag records the invalidation and regenerates the entry', async (
 
 	// The tombstone is what every worker and node compares entries against, so it must outlive every
 	// entry it invalidates — those live at most the table's 7 days from their last write.
+	// nextjs_cache_invalidation is keyed by the tag itself, so an exact match is correct here.
 	const tombstones = await request.post(harper.operationsAPIURL, {
-		headers: { 'Content-Type': 'application/json', Authorization: authHeader },
+		headers: { 'Content-Type': 'application/json', 'Authorization': authHeader(harper) },
 		data: {
 			operation: 'search_by_value',
 			database: 'harperfast_nextjs',
