@@ -827,6 +827,37 @@ describe('concurrent invalidations of one tag', () => {
 	});
 });
 
+// FAILS: still open. `recordInvalidation` nudges each write's Harper version past the last so a
+// same-millisecond pair cannot tie, but that version lives only in the write context — the row's own
+// `timestamp` stays the whole millisecond, and events carry no version at all. `noteInvalidation`
+// orders by that integer and lets an equal `at` overwrite, so on the one path where the two orderings
+// disagree the older view can win.
+describe('two invalidations issued in the same millisecond', () => {
+	beforeEach(() => resetInvalidationStateForTesting());
+
+	it('does not let an older hydration row downgrade a newer hard expiry', async () => {
+		const lapsesAt = 1000 + YEAR_MS;
+		// What the start-up scan finds: the earlier, profiled invalidation.
+		const table = makeInvalidationTable([{ id: 'products', timestamp: 1000, stale: 1000, expired: 61_000, lapsesAt }]);
+		const search = table.search.bind(table);
+		table.search = () => {
+			// The later hard expiry arrives on the subscription while that scan is still running, so the
+			// scan's older row is applied second.
+			table.listener?.({ type: 'put', id: 'products', value: { timestamp: 1000, expired: 1000, lapsesAt } });
+			return search();
+		};
+		const deps = makeDeps({ invalidation: table, now: 2000 });
+
+		await initializeInvalidationSubscription(deps);
+
+		assert.equal(
+			tagState(['products'], 500, 2000),
+			'expired',
+			'the hard expiry was downgraded to stale, so the worker serves what it had to withhold'
+		);
+	});
+});
+
 describe('chunk', () => {
 	it('splits into fixed-size batches with a short tail', () => {
 		assert.deepEqual(chunk([1, 2, 3, 4, 5], 2), [[1, 2], [3, 4], [5]]);
