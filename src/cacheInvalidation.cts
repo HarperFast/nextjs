@@ -69,12 +69,19 @@ interface SweepableTable {
 	expirationMS?: number;
 }
 
+interface TombstoneSubscription {
+	on(event: string, listener: (event: { type: string; id: string; value?: Omit<TombstoneRow, 'id'> }) => void): void;
+	end?(): void;
+}
+
 interface InvalidationTable {
-	put(id: string, value: Omit<TombstoneRow, 'id'>, context?: { expiresAt?: number }): Promise<unknown> | unknown;
+	put(
+		id: string,
+		value: Omit<TombstoneRow, 'id'>,
+		context?: { expiresAt?: number; timestamp?: number }
+	): Promise<unknown> | unknown;
 	search(): AsyncIterable<TombstoneRow>;
-	subscribe(request: { omitCurrent?: boolean }): Promise<{
-		on(event: string, listener: (event: { type: string; id: string; value?: Omit<TombstoneRow, 'id'> }) => void): void;
-	}>;
+	subscribe(request: { omitCurrent?: boolean }): Promise<TombstoneSubscription>;
 }
 
 export interface InvalidationDeps {
@@ -394,12 +401,23 @@ export async function hydrateInvalidations(
 	}
 }
 
-let subscription: Awaited<ReturnType<InvalidationTable['subscribe']>> | undefined;
-let initialization: Promise<void> | undefined;
+let subscription: TombstoneSubscription | undefined;
+let initialization: Promise<boolean> | undefined;
 let initialized = false;
 let subscriptionRetryAt = 0;
 let subscriptionRetryMs = SUBSCRIPTION_RETRY_MIN_MS;
 let pruneTimerStarted = false;
+let lastTombstoneVersion = 0;
+
+/**
+ * The Harper version a tombstone write carries: its issue time, nudged past this worker's previous one.
+ * Harper keeps the existing record on a tie, which would drop a second invalidation issued in the same
+ * millisecond — and that one carries the merged, newer view of the tag.
+ */
+function nextTombstoneVersion(now: number): number {
+	lastTombstoneVersion = Math.max(now, lastTombstoneVersion + 0.001);
+	return lastTombstoneVersion;
+}
 
 function onTombstoneEvent(
 	event: { type: string; id: string; value?: Omit<TombstoneRow, 'id'> },
@@ -421,30 +439,50 @@ function startPruneTimer(deps: InvalidationDeps): void {
 }
 
 /**
+ * A subscription that has ended delivers nothing more, so this worker's view would silently fall behind.
+ * Dropping it makes the next read subscribe again and re-hydrate, which recovers anything missed meanwhile.
+ */
+function onSubscriptionLost(lost: TombstoneSubscription, deps: InvalidationDeps): void {
+	if (subscription !== lost) return;
+	subscription = undefined;
+	initialized = false;
+	getLogger(deps).error('[CacheHandler] invalidation subscription ended; it will be re-established');
+}
+
+/**
  * Subscribe to tombstones, then hydrate from storage. Subscribing first means an invalidation written
  * while the hydration scan runs is still observed; `noteInvalidation` makes the overlap harmless.
  * Concurrent callers share one attempt, and a failure backs off rather than retrying on every request.
+ *
+ * Resolves true once this worker's view of the tombstones is complete. Until then a read cannot tell an
+ * invalidated entry from a fresh one, so callers must treat it as a miss.
  */
-export function initializeInvalidationSubscription(deps: InvalidationDeps = {}): Promise<void> {
-	if (initialized) return Promise.resolve();
+export function initializeInvalidationSubscription(deps: InvalidationDeps = {}): Promise<boolean> {
+	if (initialized) return Promise.resolve(true);
 	if (initialization) return initialization;
-	if (nowFor(deps) < subscriptionRetryAt) return Promise.resolve();
+	if (nowFor(deps) < subscriptionRetryAt) return Promise.resolve(false);
 	const table = getScope(deps)?.[INVALIDATION_TABLE] as InvalidationTable | undefined;
-	if (!table) return Promise.resolve();
+	if (!table) return Promise.resolve(false);
 
 	initialization = (async () => {
 		try {
 			if (!subscription) {
 				// Harper's TypeScript types require a SubscriptionRequest, but the runtime accepts a plain literal.
-				subscription = await table.subscribe({ omitCurrent: true });
-				subscription.on('data', (event) => onTombstoneEvent(event, deps));
-				subscription.on('error', (error) => {
+				const current = await table.subscribe({ omitCurrent: true });
+				subscription = current;
+				current.on('data', (event) => onTombstoneEvent(event, deps));
+				// Harper ends a subscription with 'close'; 'error' is kept for any source that reports one.
+				current.on('close', () => onSubscriptionLost(current, deps));
+				current.on('error', (error) => {
 					getLogger(deps).error('[CacheHandler] invalidation subscription error', error);
+					onSubscriptionLost(current, deps);
+					current.end?.();
 				});
 			}
 			await hydrateInvalidations(table, deps);
 			startPruneTimer(deps);
-			initialized = true;
+			// The subscription can end while the hydration scan runs; it is not live, so neither is the view.
+			initialized = subscription !== undefined;
 			subscriptionRetryMs = SUBSCRIPTION_RETRY_MIN_MS;
 		} catch (error) {
 			subscriptionRetryAt = nowFor(deps) + subscriptionRetryMs;
@@ -453,6 +491,7 @@ export function initializeInvalidationSubscription(deps: InvalidationDeps = {}):
 		} finally {
 			initialization = undefined;
 		}
+		return initialized;
 	})();
 	return initialization;
 }
@@ -470,6 +509,7 @@ export function resetInvalidationStateForTesting(): void {
 	initialized = false;
 	subscriptionRetryAt = 0;
 	subscriptionRetryMs = SUBSCRIPTION_RETRY_MIN_MS;
+	lastTombstoneVersion = 0;
 	loadedTagsManifest = undefined;
 	unboundedCacheReported = false;
 	queuedSweeps.clear();
@@ -605,6 +645,7 @@ export async function recordInvalidation(
 	const tombstones = scope[INVALIDATION_TABLE] as InvalidationTable;
 
 	const now = nowFor(deps);
+	const version = nextTombstoneVersion(now);
 	const issued = invalidationFor(now, durations, tombstoneLifetimeMs(deps));
 
 	const merged = uniqueTags.map((tag) => {
@@ -625,8 +666,10 @@ export async function recordInvalidation(
 			tombstones.put(
 				tag,
 				{ timestamp: now, stale: invalidation.stale, expired: invalidation.expired, lapsesAt: invalidation.lapsesAt },
-				// Outlives the table's own expiration, which only bounds the entries, not their tombstones.
-				{ expiresAt: invalidation.lapsesAt }
+				// `expiresAt` outlives the table's own expiration, which only bounds the entries, not their
+				// tombstones. `timestamp` makes the issue time the write's version: Harper drops a write older
+				// than the stored version, so an older invalidation landing late cannot replace a newer one.
+				{ expiresAt: invalidation.lapsesAt, timestamp: version }
 			)
 		)
 	);

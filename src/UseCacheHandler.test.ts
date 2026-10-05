@@ -149,6 +149,14 @@ function installDatabases() {
 	return rows;
 }
 
+/** Make reading the tombstones back fail, so this worker's view of them never becomes complete. */
+function failTombstoneScan() {
+	const { databases } = globalThis as unknown as { databases: Record<string, Record<string, { search(): unknown }>> };
+	databases.harperfast_nextjs.nextjs_cache_invalidation.search = () => {
+		throw new Error('scan failed');
+	};
+}
+
 describe('UseCacheHandler streaming', () => {
 	beforeEach(() => {
 		resetInvalidationStateForTesting();
@@ -204,6 +212,31 @@ describe('UseCacheHandler streaming', () => {
 		const result = await getPromise;
 		assert.ok(result, 'a concurrent get must wait, not return undefined');
 		assert.equal(await readAll(result.value), 'deferred');
+	});
+
+	it('lets a concurrent get fall through to storage when the in-flight set fails', async () => {
+		let fail: (error: Error) => void = () => {};
+		const pending = new Promise<UseCacheEntry>((_resolve, reject) => {
+			fail = reject;
+		});
+
+		const setPromise = handler.set('k6', pending);
+		const getPromise = handler.get('k6', []);
+		// Fail only once the get is waiting on the set; failing sooner retires the set before the get sees it.
+		await new Promise((resolve) => setImmediate(resolve));
+
+		fail(new Error('render failed'));
+		await setPromise;
+
+		assert.equal(await getPromise, undefined, 'the read is a miss, not a rejection');
+	});
+
+	it('treats every read as a miss until the tombstones have been read back', async () => {
+		const rows = installDatabases();
+		rows.set(toStorageKey('k7'), { id: 'k7', value: Buffer.from('payload'), tags: [], timestamp: Date.now() });
+		failTombstoneScan();
+
+		assert.equal(await handler.get('k7', []), undefined, 'an invalidated entry would otherwise be served as fresh');
 	});
 });
 

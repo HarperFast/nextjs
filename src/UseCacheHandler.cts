@@ -199,12 +199,13 @@ class HarperUseCacheHandler implements CacheHandler {
 	async get(cacheKey: string, _softTags: string[]): Promise<CacheEntry | undefined> {
 		const table = getTable();
 		if (!table) return undefined;
-		// A worker that has not yet read the tombstones back would serve invalidated entries as fresh.
-		await initializeInvalidationSubscription();
+		// A worker that has not read the tombstones back cannot tell an invalidated entry from a fresh one.
+		if (!(await initializeInvalidationSubscription())) return undefined;
 
-		// An in-flight set for this key must be awaited rather than reported as a miss.
+		// An in-flight set for this key must be awaited rather than reported as a miss. Its failure is the
+		// set's to report; the read falls through to whatever is stored.
 		const pending = pendingEntries.get(cacheKey);
-		if (pending) await pending;
+		if (pending) await pending.catch(() => undefined);
 
 		const record = await table.get(toStorageKey(cacheKey));
 		if (!record) return undefined;

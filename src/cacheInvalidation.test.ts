@@ -72,8 +72,12 @@ function makeInvalidationTable(rows: Array<{ id: string } & Record<string, unkno
 	return {
 		rows,
 		expirationMS: WEEK_MS,
-		puts: [] as Array<{ key: string; value: Record<string, unknown>; context?: { expiresAt?: number } }>,
-		async put(key: string, value: Record<string, unknown>, context?: { expiresAt?: number }) {
+		puts: [] as Array<{
+			key: string;
+			value: Record<string, unknown>;
+			context?: { expiresAt?: number; timestamp?: number };
+		}>,
+		async put(key: string, value: Record<string, unknown>, context?: { expiresAt?: number; timestamp?: number }) {
 			this.puts.push({ key, value, context });
 		},
 		search() {
@@ -82,12 +86,15 @@ function makeInvalidationTable(rows: Array<{ id: string } & Record<string, unkno
 			})();
 		},
 		listener: undefined as undefined | ((event: { type: string; id: string; value?: Record<string, unknown> }) => void),
+		/** Ends the latest subscription the way Harper does, with 'close'. */
+		close: undefined as undefined | (() => void),
 		subscribeCalls: 0,
 		async subscribe() {
 			this.subscribeCalls++;
 			return {
 				on: (event: string, listener: never) => {
 					if (event === 'data') this.listener = listener;
+					if (event === 'close') this.close = listener;
 				},
 			};
 		},
@@ -401,6 +408,29 @@ describe('recordInvalidation', () => {
 		assert.equal(put.value.expired, 1_060_000);
 	});
 
+	// Harper drops a write whose version precedes the stored one, so an invalidation that is issued first
+	// but lands last cannot replace a newer tombstone.
+	it('makes each tombstone write versioned by its issue time', async () => {
+		const invalidationTable = makeInvalidationTable();
+
+		await recordInvalidation(['products'], undefined, makeDeps({ invalidation: invalidationTable, now: 1000 }));
+
+		assert.equal(invalidationTable.puts[0].context?.timestamp, 1000);
+	});
+
+	it('versions a second invalidation issued in the same millisecond after the first', async () => {
+		const invalidationTable = makeInvalidationTable();
+		const deps = makeDeps({ invalidation: invalidationTable, now: 1000 });
+
+		await recordInvalidation(['products'], { expire: 60 }, deps);
+		await new Promise((resolve) => setImmediate(resolve));
+		await recordInvalidation(['products'], undefined, deps);
+
+		const [first, second] = invalidationTable.puts.map((put) => put.context?.timestamp as number);
+		assert.ok(second > first, 'a tie keeps the stored record, which would drop the newer invalidation');
+		assert.ok(second - first < 1, 'the version stays within the millisecond it was issued in');
+	});
+
 	it('keeps the stale time of an earlier invalidation a hard expiry does not replace', async () => {
 		const invalidationTable = makeInvalidationTable();
 		await recordInvalidation(['products'], { expire: 60 }, makeDeps({ invalidation: invalidationTable, now: 1000 }));
@@ -617,6 +647,56 @@ describe('initializeInvalidationSubscription', () => {
 
 		assert.equal(invalidationTable.subscribeCalls, 1);
 		assert.equal(deps.errors.length, 1);
+	});
+
+	it('reports the view as not ready until hydration succeeds', async () => {
+		let now = 1000;
+		const invalidationTable = makeInvalidationTable([{ id: 'products', timestamp: 500 }]);
+		const search = invalidationTable.search.bind(invalidationTable);
+		let failing = true;
+		invalidationTable.search = () => {
+			if (failing) throw new Error('scan failed');
+			return search();
+		};
+		const deps = { ...makeDeps({ invalidation: invalidationTable }), now: () => now };
+
+		assert.equal(await initializeInvalidationSubscription(deps), false);
+		assert.equal(await initializeInvalidationSubscription(deps), false, 'still not ready while backing off');
+
+		failing = false;
+		now += 60_000;
+		assert.equal(await initializeInvalidationSubscription(deps), true);
+		assert.equal(invalidationTable.subscribeCalls, 1, 'the retry reuses the live subscription');
+		assert.ok(cacheInvalidations.has('products'));
+	});
+
+	it('re-subscribes and re-hydrates after the subscription ends', async () => {
+		const invalidationTable = makeInvalidationTable([{ id: 'old', timestamp: 1000 }]);
+		const deps = makeDeps({ invalidation: invalidationTable, now: 3000 });
+		assert.equal(await initializeInvalidationSubscription(deps), true);
+
+		invalidationTable.close?.();
+		// Written while nothing was listening.
+		invalidationTable.rows.push({ id: 'missed', timestamp: 2000 });
+
+		assert.equal(await initializeInvalidationSubscription(deps), true);
+		assert.equal(invalidationTable.subscribeCalls, 2);
+		assert.ok(cacheInvalidations.has('missed'), 'the re-hydration recovers what the dead subscription missed');
+		assert.equal(deps.errors.length, 1, 'the lost subscription is logged');
+	});
+
+	it('ignores the end of a subscription it has already replaced', async () => {
+		const invalidationTable = makeInvalidationTable();
+		const deps = makeDeps({ invalidation: invalidationTable, now: 3000 });
+		await initializeInvalidationSubscription(deps);
+		const staleClose = invalidationTable.close;
+		staleClose?.();
+		await initializeInvalidationSubscription(deps);
+
+		staleClose?.();
+
+		assert.equal(await initializeInvalidationSubscription(deps), true);
+		assert.equal(invalidationTable.subscribeCalls, 2);
 	});
 
 	it('forgets an invalidation when its tombstone is deleted', async () => {

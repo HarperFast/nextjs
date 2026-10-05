@@ -96,8 +96,8 @@ export default class HarperCacheHandler implements CacheHandler {
 	): Promise<CacheHandlerValue | null> {
 		const databases = getDatabases();
 		if (!databases) return null;
-		// A worker that has not yet read the tombstones back would serve invalidated entries as fresh.
-		await initializeInvalidationSubscription();
+		// A worker that has not read the tombstones back cannot tell an invalidated entry from a fresh one.
+		if (!(await initializeInvalidationSubscription())) return null;
 
 		const table = databases.harperfast_nextjs.nextjs_isr_cache;
 		const record = await table.get(key);

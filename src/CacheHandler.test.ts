@@ -73,6 +73,14 @@ function installDatabases(records: Record<string, StoredRecord> = {}) {
 	return { puts, invalidationPuts };
 }
 
+/** Make reading the tombstones back fail, so this worker's view of them never becomes complete. */
+function failTombstoneScan() {
+	const { databases } = globalThis as unknown as { databases: Record<string, Record<string, { search(): unknown }>> };
+	databases.harperfast_nextjs.nextjs_cache_invalidation.search = () => {
+		throw new Error('scan failed');
+	};
+}
+
 function invalidate(tag: string, fields: Omit<TagInvalidation, 'lapsesAt'>) {
 	cacheInvalidations.set(tag, { lapsesAt: Number.MAX_SAFE_INTEGER, ...fields });
 }
@@ -205,6 +213,16 @@ describe('HarperCacheHandler on tag invalidation', () => {
 		const handler = new HarperCacheHandler();
 
 		assert.notEqual(await handler.get('/data', fetchCtx(['products'])), null);
+	});
+
+	it('treats every read as a miss until the tombstones have been read back', async () => {
+		installDatabases({ '/page': { data: appPage(['products']), tags: ['products'], lastModified: 1000 } });
+		failTombstoneScan();
+		const handler = new HarperCacheHandler();
+
+		const result = await handler.get('/page', pageCtx);
+
+		assert.equal(result, null, 'an invalidated entry would otherwise be served as fresh');
 	});
 
 	it('withholds a tag-stale entry of a kind Next never tag-checks', async () => {
