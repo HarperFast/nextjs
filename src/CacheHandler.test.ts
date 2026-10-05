@@ -134,21 +134,32 @@ describe('HarperCacheHandler per-entry cache lives', () => {
 		assert.equal(puts[0].value.expire, 3600);
 	});
 
-	it("sets the record's Harper expiry from Next's expire, capped at a year", async () => {
+	it("sets the record's Harper expiry from Next's expire", async () => {
 		const { puts } = installDatabases();
 		const handler = new HarperCacheHandler();
 		const before = Date.now();
 
 		await handler.set('/short', appPage([]) as never, { cacheControl: { revalidate: 60, expire: 3600 } } as never);
-		await handler.set('/long', appPage([]) as never, { cacheControl: { revalidate: 60, expire: 0xfffffffe } } as never);
+		await handler.set('/weeks', appPage([]) as never, { cacheControl: { revalidate: 60, expire: 2_592_000 } } as never);
 		await handler.set('/none', appPage([]) as never, { cacheControl: { revalidate: 60 } } as never);
 
-		const [short, long, none] = puts.map((put) => put.context?.expiresAt);
+		const [short, weeks, none] = puts.map((put) => put.context?.expiresAt);
 		assert.ok(short! >= before + 3_600_000 && short! <= Date.now() + 3_600_000);
-		assert.ok(long! > Date.now() + 604_800_000, 'not cut to the 7-day table TTL');
-		assert.ok(long! <= Date.now() + 31_536_000_000, 'no entry may outlive the year its tombstones are sized for');
-		assert.equal(puts[1].value.expire, 31_536_000, 'bounded to fit the Int column');
+		assert.ok(weeks! > Date.now() + 604_800_000, 'not cut to the 7-day table TTL');
+		assert.ok(weeks! <= Date.now() + 31_536_000_000, 'no entry may outlive the year its tombstones are sized for');
 		assert.equal(none, undefined);
+	});
+
+	// An unbounded `expire` is left to the table's own expiration rather than pinned for the year the
+	// Int column bounds it to. See entryExpiresAt.
+	it("leaves an unbounded expire to the table's expiration, but still stores a usable life", async () => {
+		const { puts } = installDatabases();
+		const handler = new HarperCacheHandler();
+
+		await handler.set('/long', appPage([]) as never, { cacheControl: { revalidate: 60, expire: 0xfffffffe } } as never);
+
+		assert.equal(puts[0].context?.expiresAt, undefined);
+		assert.equal(puts[0].value.expire, 31_536_000, 'bounded to fit the Int column');
 	});
 
 	it('stores no revalidate when Next supplies false', async () => {

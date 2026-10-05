@@ -146,7 +146,9 @@ export default class HarperCacheHandler implements CacheHandler {
 		const expire = toStoredLife(cacheControl?.expire);
 
 		const now = Date.now();
-		const expiresAt = entryExpiresAt(now, expire, now);
+		// The raw `expire`, not the stored one: see `entryExpiresAt` on why an unbounded life is left to
+		// the table's own expiration rather than pinned for the year `toStoredLife` bounds it to.
+		const expiresAt = entryExpiresAt(now, cacheControl?.expire, now);
 		await table.put(key, { data, tags, revalidate, expire }, expiresAt === undefined ? undefined : ({ expiresAt } as never));
 	}
 

@@ -410,17 +410,20 @@ describe('UseCacheHandler cache lives', () => {
 		assert.ok(putContexts.get('max')!.expiresAt! <= Date.now() + 31_536_000_000);
 	});
 
-	// Next's `default` profile. Stored as-is, Harper refuses the write and the entry never lands.
-	it('stores an entry whose expire is INFINITE_CACHE, bounded to a year', async () => {
+	// Next's `default` profile — every boundary with no cacheLife(). Stored as-is, Harper refuses the
+	// write (INFINITE_CACHE does not fit the Int column) and the entry never lands. The row is left to
+	// the table's own expiration rather than pinned for the year the column is bounded to: the build ID
+	// is part of every "use cache" key, so pinning the default case orphans a generation per deploy.
+	it("stores an entry whose expire is INFINITE_CACHE, and leaves it to the table's expiration", async () => {
 		const now = Date.now();
 		await handler.set('default', Promise.resolve(entry({ timestamp: now, revalidate: 900, expire: 0xfffffffe })));
 
 		const result = await handler.get('default', []);
 
 		assert.ok(result, 'the write was not refused');
-		assert.equal(result.expire, 31_536_000);
+		assert.equal(result.expire, 31_536_000, 'bounded to fit the Int column');
 		assert.equal(result.revalidate, 900);
-		assert.ok(putContexts.get('default')!.expiresAt! <= Date.now() + 31_536_000_000);
+		assert.equal(putContexts.get('default')?.expiresAt, undefined);
 	});
 
 	it('preserves the entry cache lives across the round trip', async () => {

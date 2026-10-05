@@ -156,10 +156,21 @@ let unboundedCacheReported = false;
 
 /**
  * Harper's per-record expiry for a cache entry: when Next says it stops being usable (`expire` seconds
- * after `writtenAt`), capped at `MAX_ENTRY_LIFETIME_MS` from now. The cap is what `tombstoneLifetimeMs`
- * relies on — no entry may outlive the tombstones that can invalidate it — so the handlers set it
- * explicitly rather than leave the record's lifetime to whatever a write's context happens to carry.
- * Undefined leaves the table default in place.
+ * after `writtenAt`). Setting it explicitly is what lets the `weeks` and `max` profiles outlive the
+ * tables' own `expiration`, rather than leaving the record's lifetime to whatever a write's context
+ * happens to carry.
+ *
+ * Undefined leaves the table's `expiration` in place, and that is deliberately what an unbounded
+ * `expire` gets. Next's `default` profile — every `'use cache'` boundary with no `cacheLife()`, which
+ * is the common case — sets `expire` to `INFINITE_CACHE` (0xfffffffe). Pinning those for the full year
+ * `toStoredLife` bounds them to would override the table TTL for the default case and keep entries no
+ * one can read: Next puts the build ID in every `'use cache'` key, so each deploy orphans a whole
+ * generation of them, and the build sweep that reclaims them is opt-in. An app that wants a definite
+ * long life asks for one — `cacheLife('max')` is 31_536_000 exactly, and is honoured.
+ *
+ * The result is still capped at `MAX_ENTRY_LIFETIME_MS` from now, which is what `tombstoneLifetimeMs`
+ * relies on: no entry may outlive the tombstones that can invalidate it. An unbounded entry is covered
+ * by the same bound, since `tombstoneLifetimeMs` also takes the tables' `expiration` into account.
  */
 export function entryExpiresAt(
 	writtenAt: number,
@@ -167,6 +178,7 @@ export function entryExpiresAt(
 	now: number = Date.now()
 ): number | undefined {
 	if (typeof expireSeconds !== 'number' || !Number.isFinite(expireSeconds) || expireSeconds <= 0) return undefined;
+	if (expireSeconds > MAX_ENTRY_LIFETIME_SECONDS) return undefined;
 	return Math.min(writtenAt + expireSeconds * 1000, now + MAX_ENTRY_LIFETIME_MS);
 }
 

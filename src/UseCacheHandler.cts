@@ -252,7 +252,9 @@ class HarperUseCacheHandler implements CacheHandler {
 			const storageKey = toStorageKey(cacheKey);
 			const timestamp = toInteger(entry.timestamp) ?? Date.now();
 			const expire = toStoredLife(entry.expire);
-			const expiresAt = entryExpiresAt(timestamp, expire);
+			// The raw `expire`, not the stored one: `toStoredLife` bounds an unbounded life to a year to fit
+			// the Int column, and `entryExpiresAt` has to be able to tell that apart from a deliberate year.
+			const expiresAt = entryExpiresAt(timestamp, entry.expire);
 			await table.put(
 				storageKey,
 				{

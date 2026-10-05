@@ -342,14 +342,26 @@ describe('entryExpiresAt', () => {
 		assert.equal(entryExpiresAt(1000, 30 * 86_400, 1000), 1000 + 30 * DAY_MS);
 	});
 
-	// The cap is what keeps every entry inside the lifetime its tombstones are sized for.
-	it('caps an entry at a year', () => {
-		assert.equal(entryExpiresAt(1000, 0xfffffffe, 1000), 1000 + YEAR_MS);
+	// `cacheLife('max')` asks for exactly a year, and gets it: it is a definite life, not an unbounded one.
+	it('honours a life of exactly a year', () => {
+		assert.equal(entryExpiresAt(1000, YEAR_MS / 1000, 1000), 1000 + YEAR_MS);
+	});
+
+	// Next's `default` profile — every "use cache" boundary with no cacheLife() — asks for INFINITE_CACHE.
+	// Pinning those would override the table TTL for the common case and keep a generation of entries per
+	// deploy, since the build ID is part of every "use cache" key.
+	it("leaves an unbounded life to the table's expiration", () => {
+		assert.equal(entryExpiresAt(1000, 0xfffffffe, 1000), undefined);
 	});
 
 	it('leaves the table default when Next gives no usable expire', () => {
 		assert.equal(entryExpiresAt(1000, undefined), undefined);
 		assert.equal(entryExpiresAt(1000, 0), undefined);
+	});
+
+	// Clock skew must not put an entry past the lifetime its tombstones are sized for.
+	it('caps an entry written in the future at a year from now', () => {
+		assert.equal(entryExpiresAt(1000 + YEAR_MS, YEAR_MS / 1000, 1000), 1000 + YEAR_MS);
 	});
 });
 
