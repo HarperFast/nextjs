@@ -31,7 +31,13 @@ interface StoredRecord {
 	lastModified?: number;
 }
 
-function installDatabases(records: Record<string, StoredRecord> = {}) {
+/** Tombstone rows the worker would hydrate, and whether that scan is allowed to succeed. */
+interface InvalidationStorage {
+	tombstones?: Array<{ id: string } & Record<string, unknown>>;
+	failSearch?: boolean;
+}
+
+function installDatabases(records: Record<string, StoredRecord> = {}, invalidation: InvalidationStorage = {}) {
 	const puts: Array<{ key: string; value: Record<string, unknown>; context?: { expiresAt?: number } }> = [];
 	const invalidationPuts: Array<{ key: string; value: Record<string, unknown> }> = [];
 
@@ -61,7 +67,15 @@ function installDatabases(records: Record<string, StoredRecord> = {}) {
 					invalidationPuts.push({ key, value });
 				},
 				search() {
-					return (async function* () {})();
+					if (invalidation.failSearch) {
+						return (async function* () {
+							throw new Error('storage unavailable');
+						})();
+					}
+					const tombstones = invalidation.tombstones ?? [];
+					return (async function* () {
+						for (const row of tombstones) yield row;
+					})();
 				},
 				async subscribe() {
 					return { on() {} };
@@ -295,5 +309,52 @@ describe('HarperCacheHandler on tag invalidation', () => {
 		const result = await handler.get('/page', pageCtx);
 
 		assert.equal(result?.lastModified, 5000);
+	});
+});
+
+// What a read must do while the invalidation map is incomplete, and what failing closed must not cost.
+describe('HarperCacheHandler reads before the tombstones are loaded', () => {
+	beforeEach(() => {
+		resetInvalidationStateForTesting();
+		useTagsManifestModuleForTesting(NEXT_16_MANIFEST);
+	});
+
+	// Before the fix, a swallowed hydration failure left `get` consulting an empty invalidation map and
+	// handing Next an entry another node had already invalidated.
+	it('does not serve an entry a stored tombstone invalidated', async () => {
+		const now = Date.now();
+		installDatabases(
+			{ '/page': { data: appPage(['products']), tags: ['products'], lastModified: now - 10_000 } },
+			{ tombstones: [{ id: 'products', timestamp: now - 5000 }], failSearch: true }
+		);
+		const handler = new HarperCacheHandler();
+
+		assert.equal(
+			await handler.get('/page', pageCtx),
+			null,
+			'the tombstone could not be read, so a miss is the only safe answer'
+		);
+	});
+
+	// The counterpart: once the scan succeeds the entry is withheld for the usual reason, not because
+	// reads stayed closed. This one passes today.
+	it('withholds the same entry once the tombstones load', async () => {
+		const now = Date.now();
+		installDatabases(
+			{ '/page': { data: appPage(['products']), tags: ['products'], lastModified: now - 10_000 } },
+			{ tombstones: [{ id: 'products', timestamp: now - 5000 }] }
+		);
+		const handler = new HarperCacheHandler();
+
+		assert.equal(await handler.get('/page', pageCtx), null);
+	});
+
+	// Failing closed must not become "miss everything": an entry nothing invalidated still serves once
+	// the scan succeeds. This one passes today.
+	it('serves an uninvalidated entry when the scan succeeds', async () => {
+		installDatabases({ '/page': { data: appPage([]), tags: [], lastModified: Date.now() } });
+		const handler = new HarperCacheHandler();
+
+		assert.notEqual(await handler.get('/page', pageCtx), null);
 	});
 });

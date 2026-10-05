@@ -109,7 +109,13 @@ function enforceSchema(value: Record<string, unknown>) {
 
 const putContexts = new Map<string, { expiresAt?: number } | undefined>();
 
-function installDatabases() {
+/** Tombstone rows the worker would hydrate, and whether that scan is allowed to succeed. */
+interface InvalidationStorage {
+	tombstones?: Array<{ id: string } & Record<string, unknown>>;
+	failSearch?: boolean;
+}
+
+function installDatabases(invalidation: InvalidationStorage = {}) {
 	const rows = new Map<string, Record<string, unknown>>();
 	putContexts.clear();
 	(globalThis as Record<string, unknown>).databases = {
@@ -138,7 +144,15 @@ function installDatabases() {
 			nextjs_cache_invalidation: {
 				async put() {},
 				search() {
-					return (async function* () {})();
+					if (invalidation.failSearch) {
+						return (async function* () {
+							throw new Error('storage unavailable');
+						})();
+					}
+					const tombstones = invalidation.tombstones ?? [];
+					return (async function* () {
+						for (const row of tombstones) yield row;
+					})();
 				},
 				async subscribe() {
 					return { on() {} };
@@ -237,6 +251,97 @@ describe('UseCacheHandler streaming', () => {
 		failTombstoneScan();
 
 		assert.equal(await handler.get('k7', []), undefined, 'an invalidated entry would otherwise be served as fresh');
+	});
+});
+
+// What a read must do while the invalidation map is incomplete, and what failing closed must not cost.
+describe('UseCacheHandler reads before the tombstones are loaded', () => {
+	// Before the fix, a swallowed hydration failure left `get` consulting an empty invalidation map and
+	// handing back an entry another node had already invalidated.
+	it('does not serve an entry a stored tombstone invalidated', async () => {
+		resetInvalidationStateForTesting();
+		const now = Date.now();
+		const rows = installDatabases({ tombstones: [{ id: 'products', timestamp: now - 5000 }], failSearch: true });
+		rows.set('tagged', {
+			id: 'tagged',
+			value: Buffer.from('stale'),
+			tags: ['products'],
+			timestamp: now - 10_000,
+			stale: 60,
+			revalidate: 300,
+			expire: 3600,
+		});
+
+		assert.equal(
+			await handler.get('tagged', []),
+			undefined,
+			'the tombstone could not be read, so a miss is the only safe answer'
+		);
+	});
+
+	// The counterpart: once the scan succeeds the entry is withheld for the usual reason, not because
+	// reads stayed closed. This one passes today.
+	it('withholds the same entry once the tombstones load', async () => {
+		resetInvalidationStateForTesting();
+		const now = Date.now();
+		const rows = installDatabases({ tombstones: [{ id: 'products', timestamp: now - 5000 }] });
+		rows.set('tagged', {
+			id: 'tagged',
+			value: Buffer.from('stale'),
+			tags: ['products'],
+			timestamp: now - 10_000,
+			stale: 60,
+			revalidate: 300,
+			expire: 3600,
+		});
+
+		assert.equal(await handler.get('tagged', []), undefined);
+	});
+
+	// A failed scan must not turn every read into a miss for an entry nothing invalidated — that would
+	// satisfy the first test by emptying the cache. This one passes today.
+	it('still serves an untagged entry when the scan succeeds', async () => {
+		resetInvalidationStateForTesting();
+		const rows = installDatabases();
+		rows.set('plain', {
+			id: 'plain',
+			value: Buffer.from('fresh'),
+			tags: [],
+			timestamp: Date.now(),
+			stale: 60,
+			revalidate: 300,
+			expire: 3600,
+		});
+
+		assert.ok(await handler.get('plain', []));
+	});
+});
+
+describe('UseCacheHandler pending writes', () => {
+	beforeEach(() => {
+		resetInvalidationStateForTesting();
+		installDatabases();
+	});
+
+	// `set` catches its own failure; before the fix a `get` awaiting the same pending work rejected with
+	// it, failing a separate request that was free to render its own value.
+	it('reports a miss, rather than rejecting, when the set it waited on fails', async () => {
+		let fail: (error: Error) => void = () => {};
+		const pending = new Promise<UseCacheEntry>((_resolve, reject) => {
+			fail = reject;
+		});
+
+		// Not awaited: `get` has to observe the in-flight set synchronously.
+		const setPromise = handler.set('failing', pending);
+		const getPromise = handler.get('failing', []);
+
+		// Let `get` reach the pending-entry wait before the write fails; rejecting in this tick would
+		// have `set` clear the entry first, and `get` would never wait on it at all.
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		fail(new Error('render failed'));
+		await setPromise;
+
+		assert.equal(await getPromise, undefined);
 	});
 });
 

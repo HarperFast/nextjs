@@ -68,10 +68,18 @@ function makeCacheTable(records: CacheRecord[], expirationMS = WEEK_MS) {
 	};
 }
 
+/**
+ * A stand-in for the tombstone table. `put` keeps the row it would leave in storage, under Harper's
+ * write-version rule: a write whose `context.timestamp` precedes the stored record's version "loses to
+ * the existing record version" (`harper/resources/Table.ts:4770`) rather than replacing it. A write
+ * carrying no version always lands, the way an unversioned `put` does. Modelling this is what lets a
+ * test read a row back the way a worker that restarts would.
+ */
 function makeInvalidationTable(rows: Array<{ id: string } & Record<string, unknown>> = []) {
 	return {
 		rows,
 		expirationMS: WEEK_MS,
+		versions: new Map<string, number>(),
 		puts: [] as Array<{
 			key: string;
 			value: Record<string, unknown>;
@@ -79,8 +87,18 @@ function makeInvalidationTable(rows: Array<{ id: string } & Record<string, unkno
 		}>,
 		async put(key: string, value: Record<string, unknown>, context?: { expiresAt?: number; timestamp?: number }) {
 			this.puts.push({ key, value, context });
+			const version = context?.timestamp;
+			const stored = this.versions.get(key);
+			if (version !== undefined && stored !== undefined && version < stored) return;
+			if (version !== undefined) this.versions.set(key, version);
+			const row = { id: key, ...value };
+			const index = rows.findIndex((existing) => existing.id === key);
+			if (index === -1) rows.push(row);
+			else rows[index] = row;
 		},
+		searchCalls: 0,
 		search() {
+			this.searchCalls++;
 			return (async function* () {
 				for (const row of rows) yield row;
 			})();
@@ -88,6 +106,7 @@ function makeInvalidationTable(rows: Array<{ id: string } & Record<string, unkno
 		listener: undefined as undefined | ((event: { type: string; id: string; value?: Record<string, unknown> }) => void),
 		/** Ends the latest subscription the way Harper does, with 'close'. */
 		close: undefined as undefined | (() => void),
+		errorListener: undefined as undefined | ((error: unknown) => void),
 		subscribeCalls: 0,
 		async subscribe() {
 			this.subscribeCalls++;
@@ -95,6 +114,7 @@ function makeInvalidationTable(rows: Array<{ id: string } & Record<string, unkno
 				on: (event: string, listener: never) => {
 					if (event === 'data') this.listener = listener;
 					if (event === 'close') this.close = listener;
+					if (event === 'error') this.errorListener = listener;
 				},
 			};
 		},
@@ -707,6 +727,103 @@ describe('initializeInvalidationSubscription', () => {
 		invalidationTable.listener?.({ type: 'delete', id: 'products' });
 
 		assert.equal(cacheInvalidations.has('products'), false);
+	});
+});
+
+// The read-path half of this defect is asserted through the handlers themselves, in
+// CacheHandler.test.ts and UseCacheHandler.test.ts: what has to hold is that a read misses, not where
+// in the call chain that is decided.
+describe('recovering from a failed start-up', () => {
+	beforeEach(() => resetInvalidationStateForTesting());
+
+	// Failing a read closed while the tombstones are unreadable must not become permanent. Passes today;
+	// it pins that whatever makes the handler tests pass still recovers once storage answers again.
+	it('knows the invalidation once the retry succeeds', async () => {
+		const table = makeInvalidationTable([{ id: 'products', timestamp: 2000 }]);
+		const search = table.search.bind(table);
+		let failing = true;
+		table.search = () =>
+			failing
+				? (async function* () {
+						throw new Error('storage unavailable');
+					})()
+				: search();
+		const deps = makeDeps({ invalidation: table });
+		let clock = 3000;
+		deps.now = () => clock;
+
+		await initializeInvalidationSubscription(deps);
+		failing = false;
+		// Past the 1s minimum backoff, so the next read is allowed to retry.
+		clock += 2000;
+		await initializeInvalidationSubscription(deps);
+
+		assert.equal(tagState(['products'], 1000, clock), 'expired');
+	});
+});
+
+describe('recovering from a lost subscription', () => {
+	beforeEach(() => resetInvalidationStateForTesting());
+
+	// The 'error' half of the fix: 'close' is Harper's own end event, but a subscription reported as
+	// errored has equally stopped delivering, and a worker that kept `initialized` set would serve
+	// entries other nodes invalidated until it restarted.
+	it('reloads the tombstones after the subscription errors', async () => {
+		const table = makeInvalidationTable();
+		const deps = makeDeps({ invalidation: table });
+		let clock = 3000;
+		deps.now = () => clock;
+
+		await initializeInvalidationSubscription(deps);
+		assert.equal(table.searchCalls, 1);
+
+		// The subscription drops, then another node invalidates the tag. No event is delivered.
+		table.errorListener?.(new Error('subscription closed'));
+		table.rows.push({ id: 'products', timestamp: 4000 });
+		clock = 5000;
+
+		// The next read, which every `get` makes.
+		await initializeInvalidationSubscription(deps);
+
+		assert.equal(table.searchCalls, 2, 'the worker kept trusting a map that had stopped updating');
+		assert.equal(tagState(['products'], 1000, clock), 'expired');
+	});
+});
+
+describe('concurrent invalidations of one tag', () => {
+	beforeEach(() => resetInvalidationStateForTesting());
+
+	// Two nodes invalidate the same tag and the older `put` commits last. What has to hold is the row
+	// left in storage, so this reads it back the way a worker that restarts would: the in-memory map
+	// orders the two correctly on a running worker and would hide a regression there.
+	it('does not let an older write replace a newer tombstone', async () => {
+		const table = makeInvalidationTable();
+		let releaseOlder = () => {};
+		const held = new Promise<void>((resolve) => {
+			releaseOlder = resolve;
+		});
+		const put = table.put.bind(table);
+		table.put = async (key, value, context) => {
+			if (value.timestamp === 1000) await held;
+			return put(key, value, context);
+		};
+
+		const older = recordInvalidation(['products'], undefined, makeDeps({ invalidation: table, now: 1000 }));
+		// A later turn, so the per-turn deduplication does not swallow the second node's invalidation.
+		await new Promise((resolve) => setImmediate(resolve));
+		await recordInvalidation(['products'], undefined, makeDeps({ invalidation: table, now: 2000 }));
+		releaseOlder();
+		await older;
+
+		// A worker that starts now sees only what storage holds.
+		resetInvalidationStateForTesting();
+		await hydrateInvalidations(table, { tagsManifestModule: null, now: () => 3000 });
+
+		assert.equal(
+			tagState(['products'], 1500, 3000),
+			'expired',
+			'an entry written between the two invalidations survived the newer one'
+		);
 	});
 });
 
