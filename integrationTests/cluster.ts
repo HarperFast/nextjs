@@ -110,19 +110,15 @@ export function authHeader(): string {
 }
 
 /**
- * Make the staged tree writable whatever uid the image runs as. `a+rwX` sets the execute bit on
- * directories only, so files do not come back executable.
+ * Make the staged tree writable by whatever uid the node containers run as. `a+rwX` sets the execute
+ * bit on directories only, so files do not come back executable. Safe to do broadly: this is a
+ * scratch directory under the system temp dir, rebuilt from scratch whenever its inputs change.
  *
- * Only the owner can chmod, and ownership changes hands halfway through staging: the host writes the
- * tree, then the container writes into it as its own uid. So each side opens up what it owns — the
- * host before the build, the image after it.
+ * Only an owner may chmod, so this is only ever called while the host owns the whole tree — see
+ * `stageRig` on why the build containers are pinned to the host's uid.
  */
 function openUpOnHost(dir: string): void {
 	execFileSync('chmod', ['-R', 'a+rwX', dir], { stdio: 'ignore' });
-}
-
-function openUpInContainer(dir: string): void {
-	docker(['run', '--rm', '-v', `${dir}:/app`, '--entrypoint', 'chmod', PRO_IMAGE, '-R', 'a+rwX', '/app']);
 }
 
 /**
@@ -158,17 +154,20 @@ export function stageRig(pluginRoot: string): string {
 	pkg.dependencies['@harperfast/nextjs'] = 'file:./plugin';
 	writeFileSync(join(staging, 'package.json'), JSON.stringify(pkg, null, '\t'));
 
-	// The image runs as `harperdb` (uid 1000). A Linux bind mount keeps the host's ownership, so on a
-	// CI runner (uid 1001) the staged tree arrives owned by someone else and `npm install` fails with
-	// "The operation was rejected by your operating system" part-way through reify. macOS hides this:
-	// virtiofs presents the mount as the container's own user. Opening the tree up is what makes the
-	// rig portable — it is a scratch directory under the system temp dir, rebuilt from scratch above.
-	openUpOnHost(staging);
-
+	// The build containers are pinned to the host's uid. Left to itself the image runs as `harperdb`
+	// (uid 1000), and a Linux bind mount keeps the host's ownership — so on a CI runner (uid 1001) the
+	// staged tree arrives owned by someone else and `npm install` dies part-way through reify with
+	// "The operation was rejected by your operating system". Opening the tree up beforehand is not
+	// enough on its own either: the container's own writes then land as uid 1000, leaving a tree
+	// neither side owns outright and so neither side can chmod. Pinning the uid keeps ownership
+	// uniform, which is what lets the host chmod and later delete the tree. macOS hides the whole
+	// problem — virtiofs presents the mount as whichever user asks — so this only ever broke in CI.
+	const asHost = typeof process.getuid === 'function' ? [`${process.getuid()}:${process.getgid?.() ?? 0}`] : [];
 	const run = (entrypoint: string, args: string[]) =>
 		docker([
 			'run', '--rm', '-v', `${staging}:/app`, '-w', '/app', '-e', 'RIG_NODE=build',
-			// The container user may not own a home on this mount; keep npm's cache and logs off it.
+			...(asHost.length ? ['--user', asHost[0]] : []),
+			// That uid has no home in the image, so keep npm's cache and logs off one.
 			'-e', 'HOME=/tmp', '-e', 'npm_config_cache=/tmp/.npm',
 			'--entrypoint', entrypoint, PRO_IMAGE, ...args,
 		]);
@@ -176,9 +175,9 @@ export function stageRig(pluginRoot: string): string {
 	run('npm', ['install', '--install-links', '--no-audit', '--no-fund']);
 	run('npx', ['next', 'build']);
 
-	// `next build` and `npm install` wrote as the container user, which now owns those files — so the
-	// reopen has to happen as that user too. Without it the host cannot delete the tree on a re-stage.
-	openUpInContainer(staging);
+	// Now that the whole tree is the host's, open it to the node containers, which run as the image's
+	// own user and need to write into `.next` at runtime.
+	openUpOnHost(staging);
 
 	writeFileSync(stamp, want);
 	return staging;
