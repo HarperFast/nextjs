@@ -642,9 +642,10 @@ describe('UseCacheHandler oversized keys', () => {
 
 /**
  * Next composes a "use cache" key with `encodeReply`, whose binary/FormData encoding can leave lone
- * surrogates in the string. `toStorageKey` derives both its truncated prefix and its digest through
- * UTF-8, which collapses every lone surrogate to U+FFFD, so two keys differing only there land on one
- * row — and `get` never checks which key that row belongs to.
+ * surrogates in the string. The truncated prefix is necessarily derived through UTF-8, which collapses
+ * every lone surrogate to U+FFFD, so keys differing only there share a prefix; the digest has to be the
+ * part that separates them, and it is taken over UTF-16 code units for exactly that reason. Deriving it
+ * through UTF-8 too put both keys on one row, and `get` never checks which key a row belongs to.
  */
 describe('UseCacheHandler oversized keys carrying a lone surrogate', () => {
 	// Oversized, so they are truncated and hashed, and identical apart from one unpaired high surrogate.
@@ -656,7 +657,7 @@ describe('UseCacheHandler oversized keys carrying a lone surrogate', () => {
 		installDatabases();
 	});
 
-	// This test fails: the collision is unfixed, and it serves one cache boundary's bytes for another's key.
+	// Before the digest moved to UTF-16 code units this served one cache boundary's bytes for another's key.
 	it('does not serve one key\'s entry for a different key', async () => {
 		await handler.set(keyA, Promise.resolve(entry({ value: streamOf('A payload') })));
 

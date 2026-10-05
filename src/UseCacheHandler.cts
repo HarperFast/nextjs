@@ -108,7 +108,12 @@ const KEY_HASH_SEPARATOR = '\u0000#';
 export function toStorageKey(cacheKey: string): string {
 	if (Buffer.byteLength(cacheKey, 'utf8') <= MAX_KEY_BYTES) return cacheKey;
 
-	const digest = createHash('sha256').update(cacheKey, 'utf8').digest('hex').slice(0, KEY_HASH_BYTES);
+	// Hashed over UTF-16 code units, not their UTF-8 encoding. Next composes a key with `encodeReply`,
+	// whose FormData/binary encoding can leave lone surrogates in the string; UTF-8 collapses every one
+	// of them to U+FFFD, so two keys differing only there would hash alike — and, since the truncated
+	// prefix collapses the same way, land on one row and serve one cache boundary's bytes for another's
+	// key. `utf16le` writes each code unit verbatim, so the digest keeps them apart.
+	const digest = createHash('sha256').update(cacheKey, 'utf16le').digest('hex').slice(0, KEY_HASH_BYTES);
 	const budget = MAX_KEY_BYTES - Buffer.byteLength(KEY_HASH_SEPARATOR, 'utf8') - digest.length;
 
 	// Truncate by BYTES on a character boundary. Slicing by .length would overshoot on
