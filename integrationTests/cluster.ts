@@ -112,9 +112,17 @@ export function authHeader(): string {
 /**
  * Make the staged tree writable whatever uid the image runs as. `a+rwX` sets the execute bit on
  * directories only, so files do not come back executable.
+ *
+ * Only the owner can chmod, and ownership changes hands halfway through staging: the host writes the
+ * tree, then the container writes into it as its own uid. So each side opens up what it owns — the
+ * host before the build, the image after it.
  */
-function openUpForContainerUser(dir: string): void {
+function openUpOnHost(dir: string): void {
 	execFileSync('chmod', ['-R', 'a+rwX', dir], { stdio: 'ignore' });
+}
+
+function openUpInContainer(dir: string): void {
+	docker(['run', '--rm', '-v', `${dir}:/app`, '--entrypoint', 'chmod', PRO_IMAGE, '-R', 'a+rwX', '/app']);
 }
 
 /**
@@ -155,7 +163,7 @@ export function stageRig(pluginRoot: string): string {
 	// "The operation was rejected by your operating system" part-way through reify. macOS hides this:
 	// virtiofs presents the mount as the container's own user. Opening the tree up is what makes the
 	// rig portable — it is a scratch directory under the system temp dir, rebuilt from scratch above.
-	openUpForContainerUser(staging);
+	openUpOnHost(staging);
 
 	const run = (entrypoint: string, args: string[]) =>
 		docker([
@@ -168,9 +176,9 @@ export function stageRig(pluginRoot: string): string {
 	run('npm', ['install', '--install-links', '--no-audit', '--no-fund']);
 	run('npx', ['next', 'build']);
 
-	// `next build` and `npm install` wrote as the container user; reopen so the host can clean up and
-	// the node containers can write into `.next` at runtime.
-	openUpForContainerUser(staging);
+	// `next build` and `npm install` wrote as the container user, which now owns those files — so the
+	// reopen has to happen as that user too. Without it the host cannot delete the tree on a re-stage.
+	openUpInContainer(staging);
 
 	writeFileSync(stamp, want);
 	return staging;
