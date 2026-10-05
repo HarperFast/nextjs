@@ -319,8 +319,8 @@ describe('HarperCacheHandler reads before the tombstones are loaded', () => {
 		useTagsManifestModuleForTesting(NEXT_16_MANIFEST);
 	});
 
-	// Before the fix, a swallowed hydration failure left `get` consulting an empty invalidation map and
-	// handing Next an entry another node had already invalidated.
+	// A swallowed hydration failure leaves the invalidation map empty, which is indistinguishable from
+	// "nothing is invalidated" — so the read has to withhold rather than hand Next a stale entry.
 	it('does not serve an entry a stored tombstone invalidated', async () => {
 		const now = Date.now();
 		installDatabases(
@@ -336,8 +336,7 @@ describe('HarperCacheHandler reads before the tombstones are loaded', () => {
 		);
 	});
 
-	// The counterpart: once the scan succeeds the entry is withheld for the usual reason, not because
-	// reads stayed closed. This one passes today.
+	// The same entry, withheld for the ordinary reason rather than because reads stayed closed.
 	it('withholds the same entry once the tombstones load', async () => {
 		const now = Date.now();
 		installDatabases(
@@ -349,8 +348,7 @@ describe('HarperCacheHandler reads before the tombstones are loaded', () => {
 		assert.equal(await handler.get('/page', pageCtx), null);
 	});
 
-	// Failing closed must not become "miss everything": an entry nothing invalidated still serves once
-	// the scan succeeds. This one passes today.
+	// Withholding cannot generalise into "miss everything": an entry nothing invalidated still serves.
 	it('serves an uninvalidated entry when the scan succeeds', async () => {
 		installDatabases({ '/page': { data: appPage([]), tags: [], lastModified: Date.now() } });
 		const handler = new HarperCacheHandler();

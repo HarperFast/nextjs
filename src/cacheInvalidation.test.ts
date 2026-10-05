@@ -827,7 +827,7 @@ describe('concurrent invalidations of one tag', () => {
 	});
 });
 
-// FAILS: still open. `recordInvalidation` nudges each write's Harper version past the last so a
+// This test fails: the gap is unfixed. `recordInvalidation` nudges each write's Harper version so a
 // same-millisecond pair cannot tie, but that version lives only in the write context — the row's own
 // `timestamp` stays the whole millisecond, and events carry no version at all. `noteInvalidation`
 // orders by that integer and lets an equal `at` overwrite, so on the one path where the two orderings

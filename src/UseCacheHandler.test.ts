@@ -268,8 +268,8 @@ describe('UseCacheHandler streaming', () => {
 
 // What a read must do while the invalidation map is incomplete, and what failing closed must not cost.
 describe('UseCacheHandler reads before the tombstones are loaded', () => {
-	// Before the fix, a swallowed hydration failure left `get` consulting an empty invalidation map and
-	// handing back an entry another node had already invalidated.
+	// A swallowed hydration failure leaves the invalidation map empty, which is indistinguishable from
+	// "nothing is invalidated" — so the read has to withhold rather than guess.
 	it('does not serve an entry a stored tombstone invalidated', async () => {
 		resetInvalidationStateForTesting();
 		const now = Date.now();
@@ -291,8 +291,7 @@ describe('UseCacheHandler reads before the tombstones are loaded', () => {
 		);
 	});
 
-	// The counterpart: once the scan succeeds the entry is withheld for the usual reason, not because
-	// reads stayed closed. This one passes today.
+	// The same entry, withheld for the ordinary reason rather than because reads stayed closed.
 	it('withholds the same entry once the tombstones load', async () => {
 		resetInvalidationStateForTesting();
 		const now = Date.now();
@@ -310,8 +309,7 @@ describe('UseCacheHandler reads before the tombstones are loaded', () => {
 		assert.equal(await handler.get('tagged', []), undefined);
 	});
 
-	// A failed scan must not turn every read into a miss for an entry nothing invalidated — that would
-	// satisfy the first test by emptying the cache. This one passes today.
+	// Withholding cannot generalise into "miss everything": an entry nothing invalidated still serves.
 	it('still serves an untagged entry when the scan succeeds', async () => {
 		resetInvalidationStateForTesting();
 		const rows = installDatabases();
@@ -658,7 +656,7 @@ describe('UseCacheHandler oversized keys carrying a lone surrogate', () => {
 		installDatabases();
 	});
 
-	// FAILS: still open. Serving one cache boundary's bytes for another's key.
+	// This test fails: the collision is unfixed, and it serves one cache boundary's bytes for another's key.
 	it('does not serve one key\'s entry for a different key', async () => {
 		await handler.set(keyA, Promise.resolve(entry({ value: streamOf('A payload') })));
 
@@ -667,10 +665,10 @@ describe('UseCacheHandler oversized keys carrying a lone surrogate', () => {
 		assert.equal(result, undefined, 'keyB got keyA\'s entry: the two keys collapsed onto one row');
 	});
 
-	// The guard that rules out the cheap fix. Comparing a stored `cacheKey` column against the incoming
-	// key cannot work here: Harper cannot store the key faithfully, so that comparison fails for the
-	// rightful owner too and turns every such read into a permanent miss. The digest has to distinguish
-	// the keys instead — hash the UTF-16 code units rather than their UTF-8 encoding.
+	// Comparing a stored `cacheKey` column against the incoming key cannot resolve the collision above:
+	// Harper cannot store the key faithfully, so the comparison fails for the rightful owner too and
+	// turns every such read into a permanent miss. The digest has to separate the keys instead, by
+	// hashing UTF-16 code units rather than their UTF-8 encoding.
 	it('still serves an entry to the key that wrote it', async () => {
 		await handler.set(keyA, Promise.resolve(entry({ value: streamOf('A payload') })));
 
