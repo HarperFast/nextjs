@@ -1,0 +1,38 @@
+name: Unit Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    name: Unit Tests (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [22, 24, 26]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # No separate build step: `npm test` compiles first, because the suite runs the emitted
+      # `dist/**/*.test.js` rather than the TypeScript sources. Unlike the integration suite this
+      # needs no Harper instance, fixtures or browsers, so it stays a seconds-long check.
+      - name: Run unit tests
+        run: npm test
