@@ -107,6 +107,17 @@ function enforceSchema(value: Record<string, unknown>) {
 	}
 }
 
+/**
+ * Harper encodes records with msgpackr, which does not preserve a lone surrogate: it survives the round
+ * trip as U+FFFD. Verified against `harper`'s own msgpackr — for a string long enough to take its
+ * Buffer.write path, which is every key this module truncates, the result is exactly a UTF-8 round
+ * trip. A mock that stores JS strings verbatim would hide that a stored key cannot be compared against
+ * the key it came from.
+ */
+function asStored(value: unknown): unknown {
+	return typeof value === 'string' ? Buffer.from(value, 'utf8').toString('utf8') : value;
+}
+
 const putContexts = new Map<string, { expiresAt?: number } | undefined>();
 
 /** Tombstone rows the worker would hydrate, and whether that scan is allowed to succeed. */
@@ -128,7 +139,8 @@ function installDatabases(invalidation: InvalidationStorage = {}) {
 				async put(key: string, value: Record<string, unknown>, context?: { expiresAt?: number }) {
 					enforcePrimaryKey(key);
 					enforceSchema(value);
-					rows.set(key, { id: key, ...value });
+					const stored = Object.fromEntries(Object.entries(value).map(([name, held]) => [name, asStored(held)]));
+					rows.set(key, { id: key, ...stored });
 					putContexts.set(key, context);
 				},
 				search() {
@@ -627,5 +639,44 @@ describe('UseCacheHandler oversized keys', () => {
 		await handler.set('short', Promise.resolve(entry({ value: streamOf('v') })));
 
 		assert.equal(rows.get('short')?.cacheKey, undefined);
+	});
+});
+
+/**
+ * Next composes a "use cache" key with `encodeReply`, whose binary/FormData encoding can leave lone
+ * surrogates in the string. `toStorageKey` derives both its truncated prefix and its digest through
+ * UTF-8, which collapses every lone surrogate to U+FFFD, so two keys differing only there land on one
+ * row — and `get` never checks which key that row belongs to.
+ */
+describe('UseCacheHandler oversized keys carrying a lone surrogate', () => {
+	// Oversized, so they are truncated and hashed, and identical apart from one unpaired high surrogate.
+	const keyA = 'x'.repeat(2000) + '\uD800';
+	const keyB = 'x'.repeat(2000) + '\uD801';
+
+	beforeEach(() => {
+		resetInvalidationStateForTesting();
+		installDatabases();
+	});
+
+	// FAILS: still open. Serving one cache boundary's bytes for another's key.
+	it('does not serve one key\'s entry for a different key', async () => {
+		await handler.set(keyA, Promise.resolve(entry({ value: streamOf('A payload') })));
+
+		const result = await handler.get(keyB, []);
+
+		assert.equal(result, undefined, 'keyB got keyA\'s entry: the two keys collapsed onto one row');
+	});
+
+	// The guard that rules out the cheap fix. Comparing a stored `cacheKey` column against the incoming
+	// key cannot work here: Harper cannot store the key faithfully, so that comparison fails for the
+	// rightful owner too and turns every such read into a permanent miss. The digest has to distinguish
+	// the keys instead — hash the UTF-16 code units rather than their UTF-8 encoding.
+	it('still serves an entry to the key that wrote it', async () => {
+		await handler.set(keyA, Promise.resolve(entry({ value: streamOf('A payload') })));
+
+		const result = await handler.get(keyA, []);
+
+		assert.ok(result, 'the rightful key must still hit');
+		assert.equal(await readAll(result.value), 'A payload');
 	});
 });
