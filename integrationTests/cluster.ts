@@ -110,6 +110,14 @@ export function authHeader(): string {
 }
 
 /**
+ * Make the staged tree writable whatever uid the image runs as. `a+rwX` sets the execute bit on
+ * directories only, so files do not come back executable.
+ */
+function openUpForContainerUser(dir: string): void {
+	execFileSync('chmod', ['-R', 'a+rwX', dir], { stdio: 'ignore' });
+}
+
+/**
  * Stage the rig once: install dependencies and run `next build` inside the Pro image, so the native
  * binaries match the container rather than the host. Cached between runs — the build is slow and the
  * inputs rarely change.
@@ -142,14 +150,27 @@ export function stageRig(pluginRoot: string): string {
 	pkg.dependencies['@harperfast/nextjs'] = 'file:./plugin';
 	writeFileSync(join(staging, 'package.json'), JSON.stringify(pkg, null, '\t'));
 
+	// The image runs as `harperdb` (uid 1000). A Linux bind mount keeps the host's ownership, so on a
+	// CI runner (uid 1001) the staged tree arrives owned by someone else and `npm install` fails with
+	// "The operation was rejected by your operating system" part-way through reify. macOS hides this:
+	// virtiofs presents the mount as the container's own user. Opening the tree up is what makes the
+	// rig portable — it is a scratch directory under the system temp dir, rebuilt from scratch above.
+	openUpForContainerUser(staging);
+
 	const run = (entrypoint: string, args: string[]) =>
 		docker([
 			'run', '--rm', '-v', `${staging}:/app`, '-w', '/app', '-e', 'RIG_NODE=build',
+			// The container user may not own a home on this mount; keep npm's cache and logs off it.
+			'-e', 'HOME=/tmp', '-e', 'npm_config_cache=/tmp/.npm',
 			'--entrypoint', entrypoint, PRO_IMAGE, ...args,
 		]);
 
 	run('npm', ['install', '--install-links', '--no-audit', '--no-fund']);
 	run('npx', ['next', 'build']);
+
+	// `next build` and `npm install` wrote as the container user; reopen so the host can clean up and
+	// the node containers can write into `.next` at runtime.
+	openUpForContainerUser(staging);
 
 	writeFileSync(stamp, want);
 	return staging;
