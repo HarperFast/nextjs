@@ -121,10 +121,16 @@ jobs:
 
       - name: Run integration tests
         run: npm run test:integration
-        timeout-minutes: 15
+        # The cluster suite stages its rig by running `npm install` and `next build` inside the Pro
+        # image before any test runs, which dominates a cold run.
+        timeout-minutes: 30
         env:
           HARPER_INTEGRATION_TEST_LOG_DIR: /tmp/harper-test-logs
           FORCE_COLOR: '1'
+          # The runner has Docker and the Pro image is public, so the cluster suite is expected to run
+          # here. Without this it would skip itself on any setup problem and the job would still be
+          # green — which is exactly how it went unexercised before.
+          HARPER_CLUSTER_REQUIRED: '1'
 
       - name: Upload Harper logs on failure
         if: failure()

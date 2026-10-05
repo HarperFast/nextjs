@@ -10,9 +10,37 @@ const execFileAsync = promisify(execFile);
  * Harper replication lives in harper-pro; the OSS `harper` distribution has no replication module and
  * rejects `add_node` as an unknown operation. These tests therefore need a Pro image.
  */
-export const PRO_IMAGE = process.env.HARPER_PRO_IMAGE ?? 'harperfast/harper-pro-openshift:5.0.26';
+export const PRO_IMAGE = process.env.HARPER_PRO_IMAGE ?? 'harperfast/harper-pro:5.3.1';
 export const NETWORK = 'harper-nextjs-clusternet';
 export const CREDENTIALS = { username: 'admin', password: 'pilotpass' };
+
+/**
+ * Docker or Podman, whichever this machine has. Podman is a drop-in for every subcommand the rig uses,
+ * and it is what the macOS workstations run — but `docker` there is usually a *shell alias*, which a
+ * direct spawn never sees, so the binary has to be probed rather than assumed. `HARPER_CONTAINER_CLI`
+ * forces one.
+ */
+function detectContainerCli(): string | null {
+	const forced = process.env.HARPER_CONTAINER_CLI;
+	for (const candidate of forced ? [forced] : ['docker', 'podman']) {
+		try {
+			execFileSync(candidate, ['version'], { stdio: 'ignore' });
+			return candidate;
+		} catch {
+			// Not installed, or not on PATH as a real executable.
+		}
+	}
+	return null;
+}
+
+export const CONTAINER_CLI = detectContainerCli();
+
+/**
+ * Set this where the cluster suite is expected to run — CI above all. Without it a suite that cannot
+ * start silently skips, which is how it came to be green everywhere and exercised nowhere. With it, a
+ * missing runtime or an unpullable image fails the run instead.
+ */
+export const CLUSTER_REQUIRED = process.env.HARPER_CLUSTER_REQUIRED === '1';
 
 export interface ClusterNode {
 	name: string;
@@ -27,26 +55,54 @@ export const NODES: ClusterNode[] = [
 ];
 
 function docker(args: string[], options: { allowFailure?: boolean } = {}): string {
+	if (!CONTAINER_CLI) throw new Error('no container CLI: install Docker or Podman, or set HARPER_CONTAINER_CLI');
 	try {
-		return execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+		return execFileSync(CONTAINER_CLI, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 	} catch (error) {
 		if (options.allowFailure) return '';
 		throw error;
 	}
 }
 
-/** Why the cluster suite cannot run here, or null when it can. */
+/**
+ * Why the cluster suite cannot run here, or null when it can. Only the container runtime is checked:
+ * a missing image is not a blocker, because `ensureImage` pulls it.
+ */
 export function clusterUnavailable(): string | null {
+	if (!CONTAINER_CLI) return 'neither docker nor podman is available (set HARPER_CONTAINER_CLI to force one)';
 	try {
-		execFileSync('docker', ['info'], { stdio: 'ignore' });
+		execFileSync(CONTAINER_CLI, ['info'], { stdio: 'ignore' });
 	} catch {
-		return 'Docker is not available';
-	}
-	const images = docker(['images', '--format', '{{.Repository}}:{{.Tag}}'], { allowFailure: true });
-	if (!images.split('\n').includes(PRO_IMAGE)) {
-		return `${PRO_IMAGE} is not present locally (replication requires harper-pro; OSS harper has no add_node)`;
+		return `${CONTAINER_CLI} is installed but its daemon/machine is not running`;
 	}
 	return null;
+}
+
+function imagePresent(): boolean {
+	// Podman prints repositories fully qualified (docker.io/harperfast/...), so match on the suffix too.
+	return docker(['images', '--format', '{{.Repository}}:{{.Tag}}'], { allowFailure: true })
+		.split('\n')
+		.map((line) => line.trim())
+		.filter(Boolean)
+		.some((image) => image === PRO_IMAGE || image.endsWith(`/${PRO_IMAGE}`));
+}
+
+/**
+ * Pull the Pro image if this machine does not already have it. Replication lives in harper-pro, so
+ * there is no OSS fallback — `add_node` is simply not an operation there.
+ */
+export function ensureImage(): void {
+	if (imagePresent()) return;
+	try {
+		docker(['pull', PRO_IMAGE]);
+	} catch (error) {
+		throw new Error(
+			`could not pull ${PRO_IMAGE} (replication requires harper-pro; OSS harper has no add_node). ` +
+				`If it is private here, log in to the registry first or set HARPER_PRO_IMAGE to one you can pull. ` +
+				`Cause: ${(error as Error).message}`
+		);
+	}
+	if (!imagePresent()) throw new Error(`${PRO_IMAGE} still not present after a pull that reported success`);
 }
 
 export function authHeader(): string {
@@ -100,6 +156,7 @@ export function stageRig(pluginRoot: string): string {
 }
 
 export async function startCluster(pluginRoot: string): Promise<void> {
+	ensureImage();
 	const staging = stageRig(pluginRoot);
 
 	docker(['network', 'create', NETWORK], { allowFailure: true });
@@ -130,14 +187,41 @@ export async function startCluster(pluginRoot: string): Promise<void> {
 
 	// `username`/`password` alone are rejected by the replication socket with "No authorization
 	// provided"; the cert-signing handshake needs an explicit Authorization header.
-	await operation(NODES[0], {
-		operation: 'add_node',
-		hostname: NODES[1].name,
-		authorization: authHeader(),
-		verify_tls: false,
-	});
+	//
+	// Retried because `waitForNode` only proves the operations API is up. The replication listener on
+	// 9933 binds later, and `add_node` against a node that has not got there yet fails with
+	// "connect ECONNREFUSED <ip>:9933 and connection was required to sign certificate".
+	await addNodeWhenReplicationIsUp();
 
+	// Both nodes must be serving Next.js, not just answering the operations API, before the first test
+	// fetches a page. The settle afterwards is for replication itself, which has no readiness signal.
+	for (const node of NODES) await waitForApp(node);
 	await new Promise((resolve) => setTimeout(resolve, 5000));
+}
+
+/**
+ * Join B to A, retrying while the replication socket is still coming up. Only the connect-refused
+ * handshake failure is retried; anything else (bad credentials, an OSS image with no `add_node`) is
+ * raised at once rather than hidden behind a timeout.
+ */
+async function addNodeWhenReplicationIsUp(timeoutMs = 120_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		try {
+			await operation(NODES[0], {
+				operation: 'add_node',
+				hostname: NODES[1].name,
+				authorization: authHeader(),
+				verify_tls: false,
+			});
+			return;
+		} catch (error) {
+			const message = (error as Error).message;
+			const starting = message.includes('ECONNREFUSED') || message.includes('required to sign certificate');
+			if (!starting || Date.now() >= deadline) throw error;
+			await new Promise((resolve) => setTimeout(resolve, 2000));
+		}
+	}
 }
 
 export async function waitForNode(node: ClusterNode, timeoutMs = 180_000): Promise<void> {
@@ -159,14 +243,42 @@ export async function operation(node: ClusterNode, body: Record<string, unknown>
 		headers: { 'Content-Type': 'application/json', Authorization: authHeader() },
 		body: JSON.stringify(body),
 	});
-	if (!response.ok) throw new Error(`${body.operation} failed: ${response.status}`);
+	if (!response.ok) {
+		// Harper puts the reason in the body; without it a failed handshake is just a bare 500.
+		const detail = await response.text().catch(() => '');
+		throw new Error(`${body.operation} failed: ${response.status} ${detail.slice(0, 500)}`);
+	}
 	return response.json();
+}
+
+/**
+ * Wait until the node is serving the Next.js app, not merely answering the operations API. Harper
+ * binds 9925 well before the plugin has Next.js up on 9926, so a request sent in between is reset
+ * mid-flight (`fetch failed` / `ECONNRESET`) rather than refused outright. A fixed sleep covered this
+ * only while the machine was idle; it is the restart path's counterpart to the `add_node` retry.
+ */
+export async function waitForApp(node: ClusterNode, timeoutMs = 180_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		try {
+			const response = await fetch(`${node.httpURL}/rig`, { headers: { Cookie: 'bucket=readiness' } });
+			// Any complete HTTP response means the app is listening; the status itself is the tests' business.
+			if (response.ok) {
+				await response.arrayBuffer();
+				return;
+			}
+		} catch {
+			// Not up yet: connection refused, or reset part-way through the response.
+		}
+		if (Date.now() >= deadline) throw new Error(`${node.name} did not serve the app within ${timeoutMs}ms`);
+		await new Promise((resolve) => setTimeout(resolve, 1000));
+	}
 }
 
 export async function restartNode(node: ClusterNode): Promise<void> {
 	docker(['restart', node.name]);
 	await waitForNode(node);
-	await new Promise((resolve) => setTimeout(resolve, 5000));
+	await waitForApp(node);
 }
 
 export async function stopCluster(): Promise<void> {

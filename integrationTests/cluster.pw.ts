@@ -2,6 +2,7 @@ import { test as base, expect } from '@playwright/test';
 import { join } from 'node:path';
 
 import {
+	CLUSTER_REQUIRED,
 	NODES,
 	authHeader,
 	clusterUnavailable,
@@ -26,6 +27,11 @@ test.setTimeout(900_000);
 test.beforeAll(async () => {
 	// Hooks carry their own timeout, which the describe-level one does not extend.
 	test.setTimeout(900_000);
+	// Where the suite is meant to run, not running it is a failure. A silent skip is how this suite
+	// came to be green on machines that never started a single node.
+	if (unavailable && CLUSTER_REQUIRED) {
+		throw new Error(`HARPER_CLUSTER_REQUIRED is set but the cluster suite cannot run: ${unavailable}`);
+	}
 	test.skip(unavailable !== null, unavailable ?? '');
 	await startCluster(PLUGIN_ROOT);
 });
