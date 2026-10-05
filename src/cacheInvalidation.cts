@@ -360,16 +360,42 @@ function revalidatedAtOf(invalidation: TagInvalidation): number {
 	return invalidation.expired ?? invalidation.stale ?? invalidation.at;
 }
 
+function earliestDefined(left: number | undefined, right: number | undefined): number | undefined {
+	if (left === undefined) return right;
+	if (right === undefined) return left;
+	return Math.min(left, right);
+}
+
+/**
+ * Two invalidations of one tag issued in the same millisecond. `at` cannot order them — the write
+ * version that separates them on storage is not carried by the row or by a subscription event — so
+ * arrival order would otherwise decide, and the same pair can arrive in either order on different
+ * workers. Take the stricter of the two instead: the earliest `stale` and the earliest `expired`
+ * withhold the most, which is the safe direction, and it is the same answer whichever arrived first.
+ * Without it a hard expiry delivered first is downgraded by a deferred one applied second, and the
+ * worker serves what it was told to withhold.
+ */
+function stricterOf(existing: TagInvalidation, incoming: TagInvalidation): TagInvalidation {
+	return {
+		stale: earliestDefined(existing.stale, incoming.stale),
+		expired: earliestDefined(existing.expired, incoming.expired),
+		at: incoming.at,
+		lapsesAt: Math.max(existing.lapsesAt, incoming.lapsesAt),
+	};
+}
+
 /**
  * Adopt an invalidation into this worker's view. The newest (by `at`) wins, so the subscription, the
- * start-up hydration and this worker's own writes can arrive in any order.
+ * start-up hydration and this worker's own writes can arrive in any order; a tie is resolved by
+ * `stricterOf` rather than by which arrived last.
  */
 export function noteInvalidation(tag: string, invalidation: TagInvalidation, deps: InvalidationDeps = {}): void {
 	const existing = cacheInvalidations.get(tag);
 	if (existing && existing.at > invalidation.at) return;
 	if (invalidation.lapsesAt <= nowFor(deps)) return;
-	cacheInvalidations.set(tag, invalidation);
-	mirrorToTagsManifest(tag, invalidation, existing, deps);
+	const adopted = existing && existing.at === invalidation.at ? stricterOf(existing, invalidation) : invalidation;
+	cacheInvalidations.set(tag, adopted);
+	mirrorToTagsManifest(tag, adopted, existing, deps);
 }
 
 function forgetInvalidation(tag: string, deps: InvalidationDeps): void {

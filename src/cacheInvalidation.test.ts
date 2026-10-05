@@ -827,11 +827,11 @@ describe('concurrent invalidations of one tag', () => {
 	});
 });
 
-// This test fails: the gap is unfixed. `recordInvalidation` nudges each write's Harper version so a
-// same-millisecond pair cannot tie, but that version lives only in the write context — the row's own
-// `timestamp` stays the whole millisecond, and events carry no version at all. `noteInvalidation`
-// orders by that integer and lets an equal `at` overwrite, so on the one path where the two orderings
-// disagree the older view can win.
+// `recordInvalidation` nudges each write's Harper version so a same-millisecond pair cannot tie on
+// storage, but that version lives only in the write context — the row's own `timestamp` stays the whole
+// millisecond, and events carry no version at all. So `noteInvalidation` cannot order a tie by `at`; it
+// takes the stricter of the two instead, which is the same answer whichever arrived first. Letting an
+// equal `at` simply overwrite let the older view win on the one path where the two orderings disagree.
 describe('two invalidations issued in the same millisecond', () => {
 	beforeEach(() => resetInvalidationStateForTesting());
 
