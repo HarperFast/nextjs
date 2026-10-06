@@ -1,6 +1,7 @@
 import { execFileSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -121,6 +122,51 @@ function openUpOnHost(dir: string): void {
 	execFileSync('chmod', ['-R', 'a+rwX', dir], { stdio: 'ignore' });
 }
 
+/** Every file under `dir`, relative and sorted, skipping what is generated rather than authored. */
+function sourceFiles(dir: string, prefix = ''): string[] {
+	const skip = new Set(['node_modules', '.next', '.git', '.stamp']);
+	const found: string[] = [];
+	for (const entry of readdirSync(dir).sort()) {
+		if (skip.has(entry)) continue;
+		const absolute = join(dir, entry);
+		const relative = prefix ? `${prefix}/${entry}` : entry;
+		if (statSync(absolute).isDirectory()) found.push(...sourceFiles(absolute, relative));
+		else found.push(relative);
+	}
+	return found;
+}
+
+/**
+ * What the staged rig was built from, as a digest over the full contents of every input: the fixture
+ * (its `app/**` above all — the rig pages the assertions read) and the built plugin that gets vendored
+ * into it.
+ *
+ * Fingerprinting a hand-picked handful of files by name, and the plugin by nothing but its byte
+ * length, let a changed rig page or an edited handler reuse the previous `.next` and the previous
+ * vendored plugin — so a rerun could report a pass against code it never built. Only the plugin's
+ * emitted `dist/` is hashed, not `src/`: `dist/` is what the container installs, and it is rebuilt by
+ * `npm test` / `npm run build` before any of this runs.
+ */
+export function fingerprint(fixture: string, pluginRoot: string): string {
+	const digest = createHash('sha256');
+	for (const [label, root] of [
+		['fixture', fixture],
+		['plugin', join(pluginRoot, 'dist')],
+	] as const) {
+		for (const file of sourceFiles(root)) {
+			digest.update(`${label}/${file}\0`);
+			digest.update(readFileSync(join(root, file)));
+			digest.update('\0');
+		}
+	}
+	for (const file of ['config.yaml', 'schema.graphql', 'package.json']) {
+		digest.update(`plugin-root/${file}\0`);
+		digest.update(readFileSync(join(pluginRoot, file)));
+		digest.update('\0');
+	}
+	return digest.digest('hex');
+}
+
 /**
  * Stage the rig once: install dependencies and run `next build` inside the Pro image, so the native
  * binaries match the container rather than the host. Cached between runs — the build is slow and the
@@ -130,11 +176,7 @@ export function stageRig(pluginRoot: string): string {
 	const staging = join(tmpdir(), 'harper-nextjs-cluster-rig');
 	const fixture = join(pluginRoot, 'fixtures', 'next-16-cluster');
 	const stamp = join(staging, '.stamp');
-	const inputs = ['config.yaml', 'next.config.mjs', 'package.json', 'probe.js', 'schema.graphql']
-		.map((file) => readFileSync(join(fixture, file), 'utf8'))
-		.join('\n');
-	const pluginStamp = readFileSync(join(pluginRoot, 'dist', 'UseCacheHandler.cjs'), 'utf8');
-	const want = `${inputs}\n${pluginStamp.length}`;
+	const want = fingerprint(fixture, pluginRoot);
 
 	if (existsSync(stamp) && readFileSync(stamp, 'utf8') === want && existsSync(join(staging, '.next'))) {
 		return staging;
