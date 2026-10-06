@@ -199,7 +199,8 @@ describe('tombstoneToInvalidation', () => {
 
 	it('keeps the stale and expired a current row carries', () => {
 		const result = tombstoneToInvalidation({ timestamp: 5000, stale: 5000, expired: 65_000, lapsesAt: 99_000 });
-		assert.deepEqual(result, { stale: 5000, expired: 65_000, at: 5000, lapsesAt: 99_000 });
+		// No high-water mark: this row's expiry is still in the future, so nothing is irrevocable yet.
+		assert.deepEqual(result, { stale: 5000, expired: 65_000, at: 5000, lapsesAt: 99_000, hardExpiredAt: undefined });
 	});
 
 	it('ignores an event that carries no timestamp', () => {
@@ -473,6 +474,8 @@ describe('recordInvalidation', () => {
 			stale: 1000,
 			expired: 2000,
 			lapsesAt: 2000 + YEAR_MS + MARGIN_MS,
+			// The hard expiry has passed by definition, so the row carries it as the high-water mark.
+			hardExpiredAt: 2000,
 		});
 	});
 
@@ -844,6 +847,74 @@ describe('concurrent invalidations of one tag', () => {
 // millisecond, and events carry no version at all. So `noteInvalidation` cannot order a tie by `at`; it
 // takes the stricter of the two instead, which is the same answer whichever arrived first. Letting an
 // equal `at` simply overwrite let the older view win on the one path where the two orderings disagree.
+/**
+ * `expired` is one scalar holding two different claims: "everything before T is dead now" and
+ * "everything before T will be dead at T". A later invalidation replaces it wholesale, so a profiled
+ * call could move it into the future and un-withhold entries an earlier hard expiry had killed.
+ * `hardExpiredAt` is the high-water mark that cannot be walked back.
+ */
+describe('a hard expiry that has already passed', () => {
+	beforeEach(() => resetInvalidationStateForTesting());
+
+	const YEAR = YEAR_MS;
+
+	it('is not weakened by a later profiled invalidation on the same worker', async () => {
+		const table = makeInvalidationTable();
+		await recordInvalidation(['posts'], undefined, makeDeps({ invalidation: table, now: 1000 }));
+		await new Promise((resolve) => setImmediate(resolve));
+		await recordInvalidation(['posts'], { expire: 60 }, makeDeps({ invalidation: table, now: 2000 }));
+
+		assert.equal(
+			tagState(['posts'], 500, 3000),
+			'expired',
+			'an entry the hard expiry killed came back as merely stale'
+		);
+	});
+
+	// The same thing, but the hard expiry is the one that arrives late — another node issued it and
+	// this worker only hears about it after adopting the newer profiled view.
+	it('is adopted even when it arrives older than the view already held', () => {
+		const deps = { tagsManifestModule: null, now: () => 3000 };
+		noteInvalidation('posts', { stale: 2000, expired: 62_000, at: 2000, lapsesAt: 2000 + YEAR }, deps);
+		noteInvalidation('posts', { expired: 1000, at: 1000, lapsesAt: 1000 + YEAR }, deps);
+
+		assert.equal(tagState(['posts'], 500, 3000), 'expired');
+	});
+
+	it('survives a restart through the tombstone', async () => {
+		const table = makeInvalidationTable();
+		await recordInvalidation(['posts'], undefined, makeDeps({ invalidation: table, now: 1000 }));
+		await new Promise((resolve) => setImmediate(resolve));
+		await recordInvalidation(['posts'], { expire: 60 }, makeDeps({ invalidation: table, now: 2000 }));
+
+		// A worker that starts now sees only what storage holds.
+		resetInvalidationStateForTesting();
+		await hydrateInvalidations(table, { tagsManifestModule: null, now: () => 3000 });
+
+		assert.equal(tagState(['posts'], 500, 3000), 'expired');
+	});
+
+	it('still lets an entry written after it through', async () => {
+		const table = makeInvalidationTable();
+		await recordInvalidation(['posts'], undefined, makeDeps({ invalidation: table, now: 1000 }));
+		await new Promise((resolve) => setImmediate(resolve));
+		await recordInvalidation(['posts'], { expire: 60 }, makeDeps({ invalidation: table, now: 2000 }));
+
+		// Regenerated after the hard expiry, so only the profiled invalidation applies: stale, not dead.
+		assert.equal(tagState(['posts'], 1500, 3000), 'stale');
+	});
+
+	// The high-water mark must not freeze at the first hard expiry: a later one withholds more.
+	it('moves forward when a newer hard expiry lands', async () => {
+		const table = makeInvalidationTable();
+		await recordInvalidation(['posts'], undefined, makeDeps({ invalidation: table, now: 1000 }));
+		await new Promise((resolve) => setImmediate(resolve));
+		await recordInvalidation(['posts'], undefined, makeDeps({ invalidation: table, now: 5000 }));
+
+		assert.equal(tagState(['posts'], 3000, 6000), 'expired', 'the newer hard expiry did not apply');
+	});
+});
+
 describe('two invalidations issued in the same millisecond', () => {
 	beforeEach(() => resetInvalidationStateForTesting());
 

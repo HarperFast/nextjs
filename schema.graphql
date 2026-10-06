@@ -54,4 +54,9 @@ type NextCacheInvalidation @table(database: "harperfast_nextjs", table: "nextjs_
 	stale: Long
 	expired: Long
 	lapsesAt: Long
+	# High-water mark: the newest expiry of this tag that had already passed when the row was written.
+	# `expired` is replaced wholesale by a later invalidation, which can move it into the future; this
+	# only moves forward, so entries an earlier hard expiry withheld can never come back as merely
+	# stale. See TagInvalidation in src/cacheInvalidation.cts.
+	hardExpiredAt: Long
 }

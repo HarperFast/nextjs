@@ -40,6 +40,17 @@ export interface TagInvalidation {
 	expired?: number;
 	at: number;
 	lapsesAt: number;
+	/**
+	 * The newest expiry of this tag that has already passed — a high-water mark. Once an expiry passes
+	 * it is irrevocable: every entry older than it was declared dead and must never be served again.
+	 *
+	 * `expired` alone cannot carry that. It is a single scalar holding two different things ("everything
+	 * before T is dead now" and "everything before T will be dead at T"), and a later invalidation
+	 * replaces it wholesale. A hard `revalidateTag(tag)` followed by `revalidateTag(tag, 'max')` would
+	 * otherwise move `expired` into the future, and entries the first call withheld would come back as
+	 * merely stale. This field only ever moves forward, so no merge can weaken it.
+	 */
+	hardExpiredAt?: number;
 }
 
 export type TagState = 'expired' | 'stale' | undefined;
@@ -50,6 +61,7 @@ interface TombstoneRow {
 	stale?: number;
 	expired?: number;
 	lapsesAt?: number;
+	hardExpiredAt?: number;
 }
 
 interface CacheRow {
@@ -254,6 +266,9 @@ export function tombstoneToInvalidation(
 		expired: legacy ? row.timestamp : (row.expired ?? undefined),
 		at: legacy ? Math.min(row.timestamp, now) : row.timestamp,
 		lapsesAt: row.lapsesAt ?? row.timestamp + DEFAULT_CACHE_TTL_MS,
+		// A row written before this field existed carries none; `noteInvalidation` still derives one
+		// from `expired` once that has passed, so an upgraded instance loses nothing.
+		hardExpiredAt: row.hardExpiredAt ?? undefined,
 	};
 }
 
@@ -268,7 +283,9 @@ export function tagState(tags: Iterable<string>, writtenAt: number, now: number 
 	for (const tag of tags) {
 		const invalidation = cacheInvalidations.get(tag);
 		if (!invalidation) continue;
-		const { stale, expired } = invalidation;
+		const { stale, expired, hardExpiredAt } = invalidation;
+		// An expiry that has already passed withholds every older entry, whatever `expired` says now.
+		if (hardExpiredAt !== undefined && hardExpiredAt > writtenAt) return 'expired';
 		if (expired !== undefined && expired <= now && expired > writtenAt) return 'expired';
 		if (stale !== undefined && stale > writtenAt) state = 'stale';
 	}
@@ -283,8 +300,8 @@ export function tagState(tags: Iterable<string>, writtenAt: number, now: number 
 export function passedExpiration(tags: Iterable<string>, now: number = Date.now()): number {
 	let newest = 0;
 	for (const tag of tags) {
-		const expired = cacheInvalidations.get(tag)?.expired;
-		if (expired !== undefined && expired <= now && expired > newest) newest = expired;
+		// Includes the high-water mark: a passed expiry stays reportable after `expired` has moved on.
+		newest = Math.max(newest, passedExpiryOf(cacheInvalidations.get(tag), now));
 	}
 	return newest;
 }
@@ -372,6 +389,17 @@ function revalidatedAtOf(invalidation: TagInvalidation): number {
 	return invalidation.expired ?? invalidation.stale ?? invalidation.at;
 }
 
+/**
+ * The part of an invalidation that can no longer be taken back: its expiry, once that has passed, and
+ * any high-water mark it already carries.
+ */
+function passedExpiryOf(invalidation: TagInvalidation | undefined, now: number): number {
+	if (!invalidation) return 0;
+	const { expired, hardExpiredAt } = invalidation;
+	const justPassed = expired !== undefined && expired <= now ? expired : 0;
+	return Math.max(justPassed, hardExpiredAt ?? 0);
+}
+
 function earliestDefined(left: number | undefined, right: number | undefined): number | undefined {
 	if (left === undefined) return right;
 	if (right === undefined) return left;
@@ -393,6 +421,7 @@ function stricterOf(existing: TagInvalidation, incoming: TagInvalidation): TagIn
 		expired: earliestDefined(existing.expired, incoming.expired),
 		at: incoming.at,
 		lapsesAt: Math.max(existing.lapsesAt, incoming.lapsesAt),
+		hardExpiredAt: Math.max(existing.hardExpiredAt ?? 0, incoming.hardExpiredAt ?? 0) || undefined,
 	};
 }
 
@@ -400,14 +429,28 @@ function stricterOf(existing: TagInvalidation, incoming: TagInvalidation): TagIn
  * Adopt an invalidation into this worker's view. The newest (by `at`) wins, so the subscription, the
  * start-up hydration and this worker's own writes can arrive in any order; a tie is resolved by
  * `stricterOf` rather than by which arrived last.
+ *
+ * An expiry that has already passed survives all of that. It is carried forward even when the
+ * incoming view is older and does not replace what is held, and even when a newer view moves
+ * `expired` into the future — a worker that learns of a hard expiry late must not un-withhold the
+ * entries it covers.
  */
 export function noteInvalidation(tag: string, invalidation: TagInvalidation, deps: InvalidationDeps = {}): void {
+	const now = nowFor(deps);
+	if (invalidation.lapsesAt <= now) return;
 	const existing = cacheInvalidations.get(tag);
-	if (existing && existing.at > invalidation.at) return;
-	if (invalidation.lapsesAt <= nowFor(deps)) return;
-	const adopted = existing && existing.at === invalidation.at ? stricterOf(existing, invalidation) : invalidation;
-	cacheInvalidations.set(tag, adopted);
-	mirrorToTagsManifest(tag, adopted, existing, deps);
+	const hardExpiredAt = Math.max(passedExpiryOf(existing, now), passedExpiryOf(invalidation, now));
+
+	let adopted: TagInvalidation;
+	if (!existing) adopted = invalidation;
+	else if (existing.at > invalidation.at) adopted = existing;
+	else if (existing.at === invalidation.at) adopted = stricterOf(existing, invalidation);
+	else adopted = invalidation;
+
+	if (adopted === existing && hardExpiredAt === (existing.hardExpiredAt ?? 0)) return;
+	const next = hardExpiredAt > 0 ? { ...adopted, hardExpiredAt } : adopted;
+	cacheInvalidations.set(tag, next);
+	mirrorToTagsManifest(tag, next, existing, deps);
 }
 
 function forgetInvalidation(tag: string, deps: InvalidationDeps): void {
@@ -696,14 +739,22 @@ export async function recordInvalidation(
 			expired: issued.expired ?? existing?.expired,
 		};
 		noteInvalidation(tag, invalidation, deps);
-		return { tag, invalidation };
+		// The adopted view, not the issued one: it carries any already-passed expiry merged in above,
+		// so the row persists the high-water mark rather than dropping it on the next write.
+		return { tag, invalidation: cacheInvalidations.get(tag) ?? invalidation };
 	});
 
 	await Promise.all(
 		merged.map(({ tag, invalidation }) =>
 			tombstones.put(
 				tag,
-				{ timestamp: now, stale: invalidation.stale, expired: invalidation.expired, lapsesAt: invalidation.lapsesAt },
+				{
+					timestamp: now,
+					stale: invalidation.stale,
+					expired: invalidation.expired,
+					lapsesAt: invalidation.lapsesAt,
+					hardExpiredAt: invalidation.hardExpiredAt,
+				},
 				// `expiresAt` outlives the table's own expiration, which only bounds the entries, not their
 				// tombstones. `timestamp` makes the issue time the write's version: Harper drops a write older
 				// than the stored version, so an older invalidation landing late cannot replace a newer one.
