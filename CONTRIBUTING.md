@@ -90,3 +90,29 @@ The `fixture()` call binds the test file to its Harper fixture and handles start
 As the test suite grows, repeated patterns of locator queries and multi-step interactions should be extracted into [Page Object Models](https://playwright.dev/docs/pom). A POM is a class that wraps `page` and encapsulates the selectors and actions for a specific page or feature, keeping test files focused on assertions rather than DOM mechanics.
 
 For example, testing ISR cache revalidation involves navigating to a page, reading some state, triggering revalidation, and waiting for new content — logic that would benefit from a `CachedPage` POM rather than being inlined across multiple tests. As fixture apps grow more complex and tests start sharing the same navigation and interaction patterns, that's the signal to introduce POMs.
+
+## Commits and releases
+
+Releases are cut by semantic-release from the commits on `main`, so what lands there decides whether a
+release happens at all.
+
+**Your pull request title must be a conventional commit.** Squash is the only merge method on this
+repository, and for any PR with more than one commit GitHub uses the PR *title* as the subject of the
+commit that lands on `main`. That subject is the only thing semantic-release reads. A title with no
+type — `Add support for X` rather than `feat: add support for X` — produces a commit it classifies as
+`no release`, and the work ships silently inside whatever release comes next. This has happened twice
+(#41 and #65). CI lints the title for this reason; it also lints the commits within the PR, but the
+squash discards those subjects.
+
+Use `!` or a `BREAKING CHANGE:` footer for a breaking change (`feat!: drop Next.js 14 support`). Both
+require the `conventionalcommits` preset that `.releaserc.json` sets on **both**
+`@semantic-release/commit-analyzer` and `@semantic-release/release-notes-generator`. Leaving it off
+the analyzer silently falls back to the `angular` preset, which does not recognise `!` — `feat!:`
+passes commitlint and then yields no release at all. Keep the two presets in step.
+
+| Title | Release |
+| --- | --- |
+| `fix: …`, `perf: …`, `revert: …` | patch |
+| `feat: …` | minor |
+| `feat!: …`, or a `BREAKING CHANGE:` footer | major |
+| `docs: …`, `test: …`, `chore: …`, `refactor: …` | none |
