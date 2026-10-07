@@ -1,0 +1,13 @@
+# `rest` is declared BEFORE the Next.js plugin deliberately. The plugin registers an HTTP handler that
+# claims every path, so a Harper resource declared after it is shadowed by Next's 404.
+rest: true
+
+graphqlSchema:
+  files: 'schema.graphql'
+
+jsResource:
+  files: 'probe.js'
+
+'@harperfast/nextjs':
+  package: '@harperfast/nextjs'
+  prebuilt: true

@@ -1,0 +1,4 @@
+rest: true
+
+'@harperfast/nextjs':
+  package: '@harperfast/nextjs'

@@ -9,14 +9,54 @@ type NextBuildInfo @table(database: "harperfast_nextjs", table: "nextjs_build_in
 	status: String
 }
 
+# `revalidate`/`expire` mirror the `cacheControl` Next.js supplies on set, so an entry's own `expire` is
+# enforced wherever it is read.
+#
+# `tags` is indexed: Harper indexes each element of an array attribute, so the invalidation sweep finds a
+# tag's entries with an `equals` lookup instead of a scan (see sweepTag in src/cacheInvalidation.cts).
 type NextISRCache @table(database: "harperfast_nextjs", table: "nextjs_isr_cache", expiration: 604800) {
 	id: String @primaryKey
 	data: Any
-	tags: [String]
+	tags: [String] @indexed
+	revalidate: Int
+	expire: Int
 	lastModified: Long @updatedTime
 }
 
+# Entries written by the "use cache" directive. Separate from nextjs_isr_cache because the shapes differ:
+# a use-cache entry is an opaque byte stream with its own timestamp and cache lives, not a structured
+# IncrementalCacheValue keyed off the route.
+type NextUseCache @table(database: "harperfast_nextjs", table: "nextjs_use_cache", expiration: 604800) {
+	# `id` is the STORAGE key: the Next cache key verbatim when it fits, else truncated
+	# with a hash of the full key appended. See toStorageKey() in src/UseCacheHandler.cts —
+	# Next puts no size limit on a cache key and Harper caps a primary key at 1978 bytes.
+	id: String @primaryKey
+	# The untruncated Next cache key, only when `id` had to be shortened. Not indexed.
+	cacheKey: String
+	value: Blob
+	tags: [String] @indexed
+	timestamp: Long
+	stale: Int
+	revalidate: Int
+	expire: Int
+}
+
+# One row per invalidated tag, in Next's terms: `stale` marks older entries for background revalidation,
+# `expired` makes them unusable once it passes. `timestamp` is when the invalidation was issued; rows
+# written before `stale`/`expired` existed carry only `timestamp`, meaning "expired then".
+#
+# Reads compare entries against these rows, so a row must outlive every entry it invalidates. Each is
+# written with a per-record expiry of `lapsesAt` — the longest cache-table expiration plus a margin —
+# which outlasts the table's own `expiration`. See tombstoneLifetimeMs in src/cacheInvalidation.cts.
 type NextCacheInvalidation @table(database: "harperfast_nextjs", table: "nextjs_cache_invalidation", expiration: 604800) {
 	id: String @primaryKey
 	timestamp: Long
+	stale: Long
+	expired: Long
+	lapsesAt: Long
+	# High-water mark: the newest expiry of this tag that had already passed when the row was written.
+	# `expired` is replaced wholesale by a later invalidation, which can move it into the future; this
+	# only moves forward, so entries an earlier hard expiry withheld can never come back as merely
+	# stale. See TagInvalidation in src/cacheInvalidation.cts.
+	hardExpiredAt: Long
 }
