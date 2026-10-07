@@ -16,10 +16,9 @@ export const NETWORK = 'harper-nextjs-clusternet';
 export const CREDENTIALS = { username: 'admin', password: 'pilotpass' };
 
 /**
- * Docker or Podman, whichever this machine has. Podman is a drop-in for every subcommand the rig uses,
- * and it is what the macOS workstations run — but `docker` there is usually a *shell alias*, which a
- * direct spawn never sees, so the binary has to be probed rather than assumed. `HARPER_CONTAINER_CLI`
- * forces one.
+ * Podman is a drop-in for every subcommand the rig uses. `docker` on macOS is commonly a shell alias
+ * for it, which a direct spawn cannot see, so the binary is probed rather than assumed.
+ * `HARPER_CONTAINER_CLI` forces one.
  */
 function detectContainerCli(): string | null {
 	const forced = process.env.HARPER_CONTAINER_CLI;
@@ -36,11 +35,7 @@ function detectContainerCli(): string | null {
 
 export const CONTAINER_CLI = detectContainerCli();
 
-/**
- * Set this where the cluster suite is expected to run — CI above all. Without it a suite that cannot
- * start silently skips, which is how it came to be green everywhere and exercised nowhere. With it, a
- * missing runtime or an unpullable image fails the run instead.
- */
+/** Set where the suite must run, CI above all: a setup problem then fails the run instead of skipping it. */
 export const CLUSTER_REQUIRED = process.env.HARPER_CLUSTER_REQUIRED === '1';
 
 export interface ClusterNode {
@@ -111,12 +106,8 @@ export function authHeader(): string {
 }
 
 /**
- * Make the staged tree writable by whatever uid the node containers run as. `a+rwX` sets the execute
- * bit on directories only, so files do not come back executable. Safe to do broadly: this is a
- * scratch directory under the system temp dir, rebuilt from scratch whenever its inputs change.
- *
- * Only an owner may chmod, so this is only ever called while the host owns the whole tree — see
- * `stageRig` on why the build containers are pinned to the host's uid.
+ * Make the staged tree writable by whatever uid the node containers run as. `a+rwX` spares files the
+ * execute bit. Only an owner may chmod, so the host must own the whole tree at every call site.
  */
 function openUpOnHost(dir: string): void {
 	execFileSync('chmod', ['-R', 'a+rwX', dir], { stdio: 'ignore' });
@@ -137,15 +128,9 @@ function sourceFiles(dir: string, prefix = ''): string[] {
 }
 
 /**
- * What the staged rig was built from, as a digest over the full contents of every input: the fixture
- * (its `app/**` above all — the rig pages the assertions read) and the built plugin that gets vendored
- * into it.
- *
- * Fingerprinting a hand-picked handful of files by name, and the plugin by nothing but its byte
- * length, let a changed rig page or an edited handler reuse the previous `.next` and the previous
- * vendored plugin — so a rerun could report a pass against code it never built. Only the plugin's
- * emitted `dist/` is hashed, not `src/`: `dist/` is what the container installs, and it is rebuilt by
- * `npm test` / `npm run build` before any of this runs.
+ * Digest of every staged input, so a reused `.next` can never have been built from different code:
+ * the whole fixture tree, including the `app/**` pages the assertions read, and the plugin vendored
+ * into it. Hashing the plugin's emitted `dist/` rather than `src/` is what the container installs.
  */
 export function fingerprint(fixture: string, pluginRoot: string): string {
 	const digest = createHash('sha256');
@@ -196,14 +181,11 @@ export function stageRig(pluginRoot: string): string {
 	pkg.dependencies['@harperfast/nextjs'] = 'file:./plugin';
 	writeFileSync(join(staging, 'package.json'), JSON.stringify(pkg, null, '\t'));
 
-	// The build containers are pinned to the host's uid. Left to itself the image runs as `harperdb`
-	// (uid 1000), and a Linux bind mount keeps the host's ownership — so on a CI runner (uid 1001) the
-	// staged tree arrives owned by someone else and `npm install` dies part-way through reify with
-	// "The operation was rejected by your operating system". Opening the tree up beforehand is not
-	// enough on its own either: the container's own writes then land as uid 1000, leaving a tree
-	// neither side owns outright and so neither side can chmod. Pinning the uid keeps ownership
-	// uniform, which is what lets the host chmod and later delete the tree. macOS hides the whole
-	// problem — virtiofs presents the mount as whichever user asks — so this only ever broke in CI.
+	// One uid must own the whole staged tree: only an owner may chmod, and the host has to chmod it
+	// below and delete it on a re-stage. The image runs as `harperdb` (uid 1000) while a Linux bind
+	// mount keeps the host's ownership, so without pinning, the host's files and the container's
+	// writes land under different uids and neither can chmod all of it. macOS remaps the mount to
+	// whichever user asks, so only Linux hosts and CI depend on this.
 	const asHost = typeof process.getuid === 'function' ? [`${process.getuid()}:${process.getgid?.() ?? 0}`] : [];
 	const run = (entrypoint: string, args: string[]) =>
 		docker([
@@ -217,8 +199,7 @@ export function stageRig(pluginRoot: string): string {
 	run('npm', ['install', '--install-links', '--no-audit', '--no-fund']);
 	run('npx', ['next', 'build']);
 
-	// Now that the whole tree is the host's, open it to the node containers, which run as the image's
-	// own user and need to write into `.next` at runtime.
+	// The node containers run as the image's own user and write into `.next` at runtime.
 	openUpOnHost(staging);
 
 	writeFileSync(stamp, want);
@@ -258,9 +239,8 @@ export async function startCluster(pluginRoot: string): Promise<void> {
 	// `username`/`password` alone are rejected by the replication socket with "No authorization
 	// provided"; the cert-signing handshake needs an explicit Authorization header.
 	//
-	// Retried because `waitForNode` only proves the operations API is up. The replication listener on
-	// 9933 binds later, and `add_node` against a node that has not got there yet fails with
-	// "connect ECONNREFUSED <ip>:9933 and connection was required to sign certificate".
+	// Retried: `waitForNode` only proves the operations API is up, and the replication listener on
+	// 9933 binds later.
 	await addNodeWhenReplicationIsUp();
 
 	// Both nodes must be serving Next.js, not just answering the operations API, before the first test
@@ -322,10 +302,9 @@ export async function operation(node: ClusterNode, body: Record<string, unknown>
 }
 
 /**
- * Wait until the node is serving the Next.js app, not merely answering the operations API. Harper
- * binds 9925 well before the plugin has Next.js up on 9926, so a request sent in between is reset
- * mid-flight (`fetch failed` / `ECONNRESET`) rather than refused outright. A fixed sleep covered this
- * only while the machine was idle; it is the restart path's counterpart to the `add_node` retry.
+ * Wait until the node serves the Next.js app, not merely the operations API. Harper binds 9925 well
+ * before the plugin has Next.js up on 9926, and a request in between is reset mid-flight rather than
+ * refused, so connection failures cannot be distinguished from a node that is simply still starting.
  */
 export async function waitForApp(node: ClusterNode, timeoutMs = 180_000): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
