@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { setImmediate } from 'node:timers/promises';
 import type { FileSystemCacheContext } from './versionedCache.cjs';
 
 const require = createRequire(import.meta.url);
@@ -55,6 +56,14 @@ async function pageHTML(cache: InstanceType<typeof Handler>, key: string): Promi
 	const entry = await cache.get(key, pageContext);
 	assert.ok(entry?.value && 'html' in entry.value);
 	return entry.value.html;
+}
+
+async function invalidateWrittenTag(cache: InstanceType<typeof Handler>, key: string, tag: string) {
+	const entry = await cache.get(key, pageContext);
+	assert.ok(entry);
+	// Next 16.3 expires tags only when invalidation is strictly later than the write.
+	while (Date.now() <= entry.lastModified) await setImmediate();
+	await cache.revalidateTag(tag);
 }
 
 function pageKey(version: string): string {
@@ -224,7 +233,7 @@ for (const version of versions) describe(`versioned filesystem cache (${version}
 		const value = { ...pageValue(version, 'tagged'), headers: { 'x-next-cache-tags': tag } };
 		await cache.set(pageKey(version), value as never, pageContext as never);
 		assert.equal(await pageHTML(cache, pageKey(version)), 'tagged');
-		await cache.revalidateTag(tag);
+		await invalidateWrittenTag(cache, pageKey(version), tag);
 		assert.equal(await cache.get(pageKey(version), pageContext), null);
 		cache.resetRequestCache();
 	});
@@ -237,7 +246,7 @@ for (const version of versions) describe(`versioned filesystem cache (${version}
 		const tag = app;
 		await cache.set(pageKey(version), { ...pageValue(version, 'runtime'), headers: { 'x-next-cache-tags': tag } } as never, pageContext as never);
 		assert.equal(await pageHTML(cache, pageKey(version)), 'runtime');
-		await cache.revalidateTag(tag);
+		await invalidateWrittenTag(cache, pageKey(version), tag);
 		assert.equal(await cache.get(pageKey(version), pageContext), null);
 		assert.equal(await new Handler(context(app)).get(pageKey(version), pageContext), null);
 		await rm(join(binding.cacheDirectory, 'server'), { recursive: true });
@@ -306,7 +315,8 @@ describe('versioned cache startup and retention', () => {
 		const { app, root } = await temporaryApp(t, 'next-16');
 		const moved = join(root, 'moved-app');
 		await rename(app, moved);
-		assert.ok(await bindVersionedCache(moved));
+		await assert.rejects(bindVersionedCache(moved), /Set cacheDirectory.*components/);
+		assert.ok(await bindVersionedCache(moved, join(root, '.nextjs-cache')));
 	});
 
 	it('resolves a hoisted Next installation for both the constructor and build identity', async (t) => {

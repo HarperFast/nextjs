@@ -34,7 +34,12 @@ function nonce(html: string): string {
 	return match![1];
 }
 
-test('an old regeneration cannot pollute the next release, and regenerated pages survive restarts', async ({ request }) => {
+const loaderModes = [
+	['native', { lockdown: 'none', moduleLoader: 'none', dependencyLoader: 'native', allowedDirectory: 'any' }],
+	['default', undefined],
+] as const;
+
+for (const [mode, applications] of loaderModes) test(`an old regeneration cannot pollute the next release, and regenerated pages survive restarts (${mode} loader)`, async ({ request }) => {
 	test.setTimeout(300_000);
 	const gate = await mkdtemp(join(tmpdir(), 'next-cache-render-gate-'));
 	const dataRootDir = await mkdtemp(join(tmpdir(), 'next-cache-deployment-'));
@@ -48,7 +53,7 @@ test('an old regeneration cannot pollute the next release, and regenerated pages
 			HARPER_NEXTJS_CACHE_GATE: gate,
 			...(process.env.HARPER_NEXTJS_CACHE_BASELINE && { HARPER_NEXTJS_CACHE_BASELINE: process.env.HARPER_NEXTJS_CACHE_BASELINE }),
 		},
-		config: { threads: { count: 1 }, applications: { lockdown: 'none', moduleLoader: 'none', dependencyLoader: 'native', allowedDirectory: 'any' } },
+		config: { threads: { count: 1 }, ...(applications && { applications }) },
 	};
 	let started: StartedHarperTestContext | undefined;
 	try {
@@ -66,7 +71,8 @@ test('an old regeneration cannot pollute the next release, and regenerated pages
 			cwd: candidate, env: { ...process.env, ...options.env }, timeout: 120_000, maxBuffer: 10 * 1024 * 1024,
 		});
 
-		expect(await (await request.get(httpURL)).text()).toContain('<h1 data-release="true">v1</h1>');
+		const initial = await (await request.get(httpURL)).text();
+		expect(initial).toContain('<h1 data-release="true">v1</h1>');
 		await writeFile(join(gate, 'hold'), '');
 		expect((await request.post(`${httpURL}/api/revalidate`)).status()).toBe(200);
 		const held = request.get(httpURL);
@@ -75,10 +81,13 @@ test('an old regeneration cannot pollute the next release, and regenerated pages
 		await rename(app, join(dataRootDir, 'aside', fixtureName));
 		await rename(candidate, app);
 		await writeFile(join(gate, 'release'), '');
-		expect(await (await held).text()).toContain('<h1 data-release="true">v1</h1>');
+		const late = await (await held).text();
+		expect(late).toContain('<h1 data-release="true">v1</h1>');
+		const lateNonce = nonce(late);
+		expect(lateNonce).not.toBe(nonce(initial));
 		const baseline = process.env.HARPER_NEXTJS_CACHE_BASELINE === '1';
 		const writeRoot = baseline ? join(app, '.next', 'server', 'route-cache') : cacheDirectory;
-		await expect.poll(async () => (await htmlFiles(writeRoot)).some((html) => html.includes('<h1 data-release="true">v1</h1>'))).toBe(true);
+		await expect.poll(async () => (await htmlFiles(writeRoot)).some((html) => html.includes(lateNonce))).toBe(true);
 
 		await killHarper(started);
 		started = await startHarper(context, options);

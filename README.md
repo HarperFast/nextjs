@@ -203,7 +203,6 @@ import { withHarper, versionedCacheHandlerPath } from '@harperfast/nextjs';
 
 export default withHarper({
 	cacheHandler: versionedCacheHandlerPath(import.meta.dirname),
-	cacheMaxMemorySize: 0,
 });
 ```
 
@@ -227,11 +226,11 @@ For a custom component layout or a separate cache volume, set the plugin's `cach
   cacheDirectory: /var/cache/harper-nextjs
 ```
 
-Build seeds remain read-only in `.next`; cold whole-entry misses can read them without combining their files with partial runtime entries. Once a runtime write takes ownership of a key, a persisted marker prevents invalidated or missing entries from falling back to an older seed; Next.js must regenerate them. Legacy `.next/server/route-cache` entries are ignored. Enable the handler on outgoing workers before subsequent rolling deployments. On Next.js 14/15, the first migration from stock caching needs those old workers stopped before replacing the app, because their runtime writes share paths with build seeds. Existing contaminated build seeds require a clean deployment.
+Build seeds remain read-only in `.next`; cold whole-entry misses can read them without combining their files with partial runtime entries. Once a runtime write takes ownership of a key, a persisted marker prevents invalidated or missing entries from falling back to an older seed; Next.js must regenerate them. Legacy `.next/server/route-cache` entries are ignored. Stop outgoing stock-cache workers before the first deployment using this handler: they can overwrite render seeds on Next.js 14/15/16.2 and fetch seeds on all supported versions. Subsequent rolling deployments need the outgoing workers already using this handler. Existing contaminated build seeds require a clean deployment.
 
 This isolates incremental-cache writes. It does not isolate arbitrary app-code reads after a directory swap, move image-optimization caches, or change the Harper-backed and `'use cache'` handlers. Builds must contain regular files and directories under `.next/server`.
 
-Namespaces are retained, including after dropping an app. Plan disk capacity and remove unused namespaces while their workers are stopped. There is no automatic cache sweep: removing ownership markers while a worker is serving could revive older seeds after tag invalidation. The existing `HARPER_NEXTJS_SWEEP_OLD_BUILDS` option continues to control static-build cleanup only.
+Namespaces are retained, including after dropping an app. Debug startup logs identify the bound cache directory. Plan disk capacity and remove unused namespaces while their workers are stopped. There is no automatic cache sweep: removing ownership markers while a worker is serving could revive older seeds after tag invalidation. The existing `HARPER_NEXTJS_SWEEP_OLD_BUILDS` option continues to control static-build cleanup only.
 
 ## Caching (Work In Progress)
 

@@ -409,6 +409,7 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 		: undefined;
 	cacheBindings?.markProductionCache(join(scope.directory, '.next', 'server'));
 	const cacheBinding = await cacheBindings?.bindVersionedCache(scope.directory, config.cacheDirectory);
+	if (cacheBinding) scope.logger.debug?.(`Using Next.js versioned cache at ${cacheBinding.cacheDirectory}`);
 
 	let app;
 	switch (next.version) {
@@ -429,11 +430,12 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 			type Renderer = { getServer(): Promise<{ nextConfig: { cacheHandler?: string; distDir?: string } }> };
 			const prepared = app as unknown as { server?: Renderer; renderServer?: Renderer };
 			const renderer = next.version === 14 ? prepared.renderServer! : prepared.server!;
-			const { nextConfig } = await renderer.getServer();
-			cacheBindings.assertVersionedCacheConfig(scope.directory, nextConfig, cacheBinding);
+			const nextConfig = typeof renderer?.getServer === 'function' ? (await renderer.getServer()).nextConfig : undefined;
+			if (nextConfig) cacheBindings.assertVersionedCacheConfig(scope.directory, nextConfig, cacheBinding);
+			else if (cacheBinding) throw new Error(`Cannot verify versioned cache configuration for Next.js ${next.version}: unsupported server shape`);
 			if (cacheBinding) await cacheBindings.assertVersionedCacheBuild(cacheBinding);
 		} catch (error) {
-			await app.close();
+			await app.close().catch(() => {});
 			throw error;
 		}
 	}

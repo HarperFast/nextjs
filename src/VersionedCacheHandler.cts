@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { getCacheBinding, isProductionCache, stockCacheConstructor, type FileSystemCacheContext } from './versionedCache.cjs';
-import type FileSystemCache from 'next-16/dist/server/lib/incremental-cache/file-system-cache.js';
+import type FileSystemCache from 'next/dist/server/lib/incremental-cache/file-system-cache.js';
 
 export default class VersionedCacheHandler {
 	private runtime: FileSystemCache;

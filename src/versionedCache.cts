@@ -3,8 +3,8 @@ import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { open, readdir } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import type FileSystemCache from 'next-16/dist/server/lib/incremental-cache/file-system-cache.js';
-import type { CacheFs } from 'next-16/dist/shared/lib/utils.js';
+import type FileSystemCache from 'next/dist/server/lib/incremental-cache/file-system-cache.js';
+import type { CacheFs } from 'next/dist/shared/lib/utils.js';
 
 export type FileSystemCacheContext = ConstructorParameters<typeof FileSystemCache>[0];
 
@@ -106,6 +106,9 @@ export async function bindVersionedCache(appDirectory: string, cacheDirectory?: 
 
 	const distDirectory = resolve(appDirectory, config.distDir ?? '.next');
 	const serverDistDir = join(distDirectory, 'server');
+	if (!cacheDirectory && basename(dirname(appDirectory)) !== 'components') {
+		throw new Error(`Set cacheDirectory for a Next.js app outside <harper-root>/components/<app>: ${appDirectory}`);
+	}
 	const cacheRoot = cacheDirectory ? resolve(appDirectory, cacheDirectory) : join(dirname(dirname(appDirectory)), '.nextjs-cache');
 	const cacheRelative = relative(appDirectory, cacheRoot);
 	if (!cacheRelative || (!isAbsolute(cacheRelative) && !cacheRelative.startsWith('..' + sep) && cacheRelative !== '..')) {
@@ -159,6 +162,7 @@ export function isProductionCache(serverDistDir: string): boolean {
 }
 
 export function stockCacheConstructor(serverDistDir: string): typeof FileSystemCache {
+	serverDistDir = resolve(serverDistDir);
 	const cached = fallbackConstructors.get(serverDistDir);
 	if (cached) return cached;
 	const constructor = createRequire(join(serverDistDir, 'package.json'))('next/dist/server/lib/incremental-cache/file-system-cache.js').default as typeof FileSystemCache;
