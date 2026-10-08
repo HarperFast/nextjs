@@ -31,6 +31,7 @@ type Bundler = 'webpack' | 'turbopack';
 
 interface NextPluginConfig extends Config {
 	buildOnly: boolean;
+	cacheDirectory?: string;
 	bundler: Bundler;
 	dev: boolean;
 	// @ts-expect-error
@@ -79,6 +80,7 @@ function resolveConfig(scope: Scope): NextPluginConfig {
 	}
 
 	assertType('buildOnly', options.buildOnly, 'boolean');
+	assertType('cacheDirectory', options.cacheDirectory, 'string');
 	assertType('bundler', options.bundler, 'string');
 	assertType('dev', options.dev, 'boolean');
 	assertType('port', options.port, 'number');
@@ -401,6 +403,11 @@ async function runNextBuild(scope: Scope, config: NextPluginConfig, next: NextPa
 
 async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) {
 	scope.logger.debug?.(`Serving Next.js application at ${scope.directory}`);
+	const cacheBindings = !config.dev
+		? createRequire(import.meta.url)('./versionedCache.cjs') as typeof import('./versionedCache.cjs')
+		: undefined;
+	cacheBindings?.markProductionCache(join(scope.directory, '.next', 'server'));
+	const cacheBinding = cacheBindings?.bindVersionedCache(scope.directory, config.cacheDirectory);
 
 	let app;
 	switch (next.version) {
@@ -416,6 +423,27 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 	}
 
 	await app.prepare();
+	if (cacheBindings && cacheBinding) {
+		try {
+			cacheBindings.assertVersionedCacheBuild(cacheBinding);
+		} catch (error) {
+			await app.close();
+			throw error;
+		}
+		const workerIndex =
+			(harper as unknown as { server?: WorkerServer }).server?.workerIndex ??
+			(globalThis as { server?: WorkerServer }).server?.workerIndex;
+		if (oldBuildSweepEnabled() && (workerIndex === undefined || workerIndex === 0)) {
+			const timer = setTimeout(async () => {
+				try {
+					await cacheBindings.sweepVersionedCache(cacheBinding);
+				} catch (error) {
+					scope.logger.error?.('Error sweeping versioned Next.js cache: ', error);
+				}
+			}, OLD_BUILD_SWEEP_DELAY_MS);
+			timer.unref();
+		}
+	}
 
 	const requestHandler = app.getRequestHandler();
 
