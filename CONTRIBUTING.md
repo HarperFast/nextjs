@@ -102,9 +102,9 @@ Releases are cut by semantic-release from the commits on `main`, so what lands t
 | `fix: …`, `perf: …`, `revert: …` | patch |
 | `feat: …` | minor |
 | `feat!: …`, or a `BREAKING CHANGE:` footer | major |
-| `build: …`, `chore: …`, `ci: …`, `docs: …`, `refactor: …`, `style: …`, `test: …` | none |
+| `chore: …`, `ci: …`, `docs: …`, `refactor: …`, `test: …` | none |
 
-`none` means the commit does not trigger a release by itself, not that it is invisible: `.releaserc.json` gives every type above its own section, so it still appears in the notes of whatever release it rides along in.
+`none` means the commit does not trigger a release by itself, not that it is invisible: `.releaserc.json` gives every type above its own section, so it still appears in the notes of whatever release it rides along in. A type that is not listed there — `style` and `build`, which this repository does not use — is hidden from the notes instead.
 
 ### Breaking changes
 
