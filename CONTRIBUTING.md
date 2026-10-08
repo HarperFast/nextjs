@@ -90,3 +90,47 @@ The `fixture()` call binds the test file to its Harper fixture and handles start
 As the test suite grows, repeated patterns of locator queries and multi-step interactions should be extracted into [Page Object Models](https://playwright.dev/docs/pom). A POM is a class that wraps `page` and encapsulates the selectors and actions for a specific page or feature, keeping test files focused on assertions rather than DOM mechanics.
 
 For example, testing ISR cache revalidation involves navigating to a page, reading some state, triggering revalidation, and waiting for new content — logic that would benefit from a `CachedPage` POM rather than being inlined across multiple tests. As fixture apps grow more complex and tests start sharing the same navigation and interaction patterns, that's the signal to introduce POMs.
+
+## Commits and releases
+
+Releases are cut by semantic-release from the commits on `main`, so what lands there decides whether a release happens at all.
+
+**Your pull request title must be a conventional commit.** Squash is the only merge method on this repository, and for any PR with more than one commit GitHub uses the PR *title* as the subject of the commit that lands on `main`. That subject is the only thing semantic-release reads for the release type. A title with no type — `Add support for X` rather than `feat: add support for X` — produces a commit it classifies as `no release`, and the work ships silently inside whatever release comes next. This has happened twice (#41 and #65). CI lints the title for that reason; it also lints the commits within the PR, but the squash discards those subjects.
+
+| Title | Release |
+| --- | --- |
+| `fix: …`, `perf: …`, `revert: …` | patch |
+| `feat: …` | minor |
+| `feat!: …`, or a `BREAKING CHANGE:` footer | major |
+| `chore: …`, `ci: …`, `docs: …`, `refactor: …`, `test: …` | none |
+
+`none` means the commit does not trigger a release by itself, not that it is invisible: `.releaserc.json` gives every type above its own section, so it still appears in the notes of whatever release it rides along in. A type that is not listed there — `style` and `build`, which this repository does not use — is hidden from the notes instead.
+
+### Breaking changes
+
+There are two ways to declare one, and squashing treats them differently. The `!` is read only from the commit *subject*; a `BREAKING CHANGE:` footer is read from the *body*. Since the PR title becomes the subject and the squashed commit messages become the body, `feat!:` counts only in the PR title — buried in a commit inside the PR it does nothing. A footer, by contrast, survives the squash even when the title has no type at all.
+
+| Declared as | In the PR title | In a commit body |
+| --- | --- | --- |
+| `feat!: …` | major | none |
+| `BREAKING CHANGE: …` footer | n/a | major |
+
+Do both. The `!` in the title is what makes the release major; the footer is what the notes quote, so write it for someone upgrading rather than restating the subject.
+
+```
+feat!: drop Next.js 14 support
+
+Next 14 has no cacheHandlers interface, so the use-cache handler cannot be registered there.
+
+BREAKING CHANGE: Next.js 14 is no longer supported. Upgrade to 15 or 16.
+```
+
+That renders as:
+
+```markdown
+### ⚠ BREAKING CHANGES
+
+* Next.js 14 is no longer supported. Upgrade to 15 or 16.
+```
+
+Both forms depend on the `conventionalcommits` preset that `.releaserc.json` sets on **both** `@semantic-release/commit-analyzer` and `@semantic-release/release-notes-generator`, and on `conventional-changelog-conventionalcommits` staying in `release.yaml`'s `extra_plugins`. Leave the preset off the analyzer and it falls back to `angular`, which does not recognise `!`: `feat!:` then passes commitlint and yields no release at all. Keep the two in step.

@@ -7,7 +7,23 @@ on:
     branches: [main]
 
 jobs:
+  # Squash is the only merge method on this repo, and `squash_merge_commit_title` is
+  # COMMIT_OR_PR_TITLE — so for any PR with more than one commit, the PR title becomes the subject of
+  # the commit that lands on main, and that subject is what semantic-release reads to decide the
+  # release. commitlint below only sees the commits inside the PR, which the squash then discards.
+  # Without this job a non-conventional title is silently a no-release: it happened to #41 and #65.
+  pr-title:
+    name: PR Title
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Lint PR title
+        uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   commitlint:
+    name: Commitlint
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
