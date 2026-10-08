@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { createHarperContext, setupHarperWithFixture, startHarper, killHarper, teardownHarper, type StartedHarperTestContext } from '@harperfast/integration-testing';
+import { createHarperContext, startHarper, killHarper, teardownHarper, type StartedHarperTestContext } from '@harperfast/integration-testing';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { mkdtemp, cp, mkdir, readFile, writeFile, readdir, rename, rm } from 'node:fs/promises';
@@ -37,7 +37,10 @@ function nonce(html: string): string {
 test('an old regeneration cannot pollute the next release, and regenerated pages survive restarts', async ({ request }) => {
 	test.setTimeout(300_000);
 	const gate = await mkdtemp(join(tmpdir(), 'next-cache-render-gate-'));
+	const dataRootDir = await mkdtemp(join(tmpdir(), 'next-cache-deployment-'));
+	const cacheDirectory = join(dataRootDir, 'cache-by-build');
 	const context = createHarperContext(fixtureName);
+	context.harper = { dataRootDir };
 	const options = {
 		harperBinPath: join(dirname(require.resolve('harper')), 'bin', 'harper.js'),
 		startupTimeoutMs: 120_000,
@@ -45,13 +48,16 @@ test('an old regeneration cannot pollute the next release, and regenerated pages
 			HARPER_NEXTJS_CACHE_GATE: gate,
 			...(process.env.HARPER_NEXTJS_CACHE_BASELINE && { HARPER_NEXTJS_CACHE_BASELINE: process.env.HARPER_NEXTJS_CACHE_BASELINE }),
 		},
-		config: { applications: { lockdown: 'none', moduleLoader: 'none', dependencyLoader: 'native', allowedDirectory: 'any' } },
+		config: { threads: { count: 1 }, applications: { lockdown: 'none', moduleLoader: 'none', dependencyLoader: 'native', allowedDirectory: 'any' } },
 	};
 	let started: StartedHarperTestContext | undefined;
 	try {
-		started = await setupHarperWithFixture(context, join(import.meta.dirname, '..', 'fixtures', fixtureName), options);
-		const { dataRootDir, httpURL } = started.harper;
 		const app = join(dataRootDir, 'components', fixtureName);
+		await cp(join(import.meta.dirname, '..', 'fixtures', fixtureName), app, { recursive: true, dereference: true });
+		const configFile = join(app, 'config.yaml');
+		await writeFile(configFile, await readFile(configFile, 'utf8') + `  cacheDirectory: ${JSON.stringify(cacheDirectory)}\n`);
+		started = await startHarper(context, options);
+		const { httpURL } = started.harper;
 		const candidate = join(dataRootDir, 'candidate');
 		await cp(app, candidate, { recursive: true, dereference: true, filter: (file) => file !== join(app, '.next') });
 		await writeFile(join(candidate, 'release.mjs'), "export const release = 'v2';\n");
@@ -71,7 +77,7 @@ test('an old regeneration cannot pollute the next release, and regenerated pages
 		await writeFile(join(gate, 'release'), '');
 		expect(await (await held).text()).toContain('<h1 data-release="true">v1</h1>');
 		const baseline = process.env.HARPER_NEXTJS_CACHE_BASELINE === '1';
-		const writeRoot = baseline ? join(app, '.next', 'server', 'route-cache') : join(dataRootDir, '.nextjs-cache');
+		const writeRoot = baseline ? join(app, '.next', 'server', 'route-cache') : cacheDirectory;
 		await expect.poll(async () => (await htmlFiles(writeRoot)).some((html) => html.includes('<h1 data-release="true">v1</h1>'))).toBe(true);
 
 		await killHarper(started);
@@ -86,7 +92,7 @@ test('an old regeneration cannot pollute the next release, and regenerated pages
 			regenerated = nonce(await (await request.get(httpURL)).text());
 			return regenerated;
 		}).not.toBe(seedNonce);
-		await expect.poll(async () => (await htmlFiles(join(dataRootDir, '.nextjs-cache'))).some((html) => html.includes(regenerated))).toBe(true);
+		await expect.poll(async () => (await htmlFiles(cacheDirectory)).some((html) => html.includes(regenerated))).toBe(true);
 		await killHarper(started);
 		started = await startHarper(context, options);
 		const afterRestart = await request.get(httpURL);
@@ -95,6 +101,7 @@ test('an old regeneration cannot pollute the next release, and regenerated pages
 	} finally {
 		await writeFile(join(gate, 'release'), '').catch(() => {});
 		if (started) await teardownHarper(started);
+		await rm(dataRootDir, { recursive: true, force: true });
 		await rm(gate, { recursive: true, force: true });
 	}
 });

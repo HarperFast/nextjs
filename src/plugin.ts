@@ -95,6 +95,7 @@ function resolveConfig(scope: Scope): NextPluginConfig {
 	// TODO: Remove type casts when we have more proper plugin option validation from core
 	return {
 		buildOnly: (options.buildOnly as boolean) ?? false,
+		cacheDirectory: options.cacheDirectory as string,
 		// bundler default is set later in handleApplication() based on the detected Next.js version
 		bundler: options.bundler as Bundler,
 		dev: (options.dev as boolean) ?? false,
@@ -407,7 +408,7 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 		? createRequire(import.meta.url)('./versionedCache.cjs') as typeof import('./versionedCache.cjs')
 		: undefined;
 	cacheBindings?.markProductionCache(join(scope.directory, '.next', 'server'));
-	const cacheBinding = cacheBindings?.bindVersionedCache(scope.directory, config.cacheDirectory);
+	const cacheBinding = await cacheBindings?.bindVersionedCache(scope.directory, config.cacheDirectory);
 
 	let app;
 	switch (next.version) {
@@ -423,25 +424,17 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 	}
 
 	await app.prepare();
-	if (cacheBindings && cacheBinding) {
+	if (cacheBindings) {
 		try {
-			cacheBindings.assertVersionedCacheBuild(cacheBinding);
+			type Renderer = { getServer(): Promise<{ nextConfig: { cacheHandler?: string; distDir?: string } }> };
+			const prepared = app as unknown as { server?: Renderer; renderServer?: Renderer };
+			const renderer = next.version === 14 ? prepared.renderServer! : prepared.server!;
+			const { nextConfig } = await renderer.getServer();
+			cacheBindings.assertVersionedCacheConfig(scope.directory, nextConfig, cacheBinding);
+			if (cacheBinding) await cacheBindings.assertVersionedCacheBuild(cacheBinding);
 		} catch (error) {
 			await app.close();
 			throw error;
-		}
-		const workerIndex =
-			(harper as unknown as { server?: WorkerServer }).server?.workerIndex ??
-			(globalThis as { server?: WorkerServer }).server?.workerIndex;
-		if (oldBuildSweepEnabled() && (workerIndex === undefined || workerIndex === 0)) {
-			const timer = setTimeout(async () => {
-				try {
-					await cacheBindings.sweepVersionedCache(cacheBinding);
-				} catch (error) {
-					scope.logger.error?.('Error sweeping versioned Next.js cache: ', error);
-				}
-			}, OLD_BUILD_SWEEP_DELAY_MS);
-			timer.unref();
 		}
 	}
 

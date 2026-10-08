@@ -1,7 +1,7 @@
 import { describe, it, type TestContext } from 'node:test';
 import assert from 'node:assert';
 import { createRequire } from 'node:module';
-import { mkdtemp, mkdir, writeFile, readFile, rename, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rename, rm, symlink } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -10,7 +10,7 @@ import { promisify } from 'node:util';
 import type { FileSystemCacheContext } from './versionedCache.cjs';
 
 const require = createRequire(import.meta.url);
-const { bindVersionedCache, assertVersionedCacheBuild, sweepVersionedCache, markProductionCache } = require('./versionedCache.cjs') as typeof import('./versionedCache.cjs');
+const { bindVersionedCache, assertVersionedCacheBuild, assertVersionedCacheConfig, markProductionCache } = require('./versionedCache.cjs') as typeof import('./versionedCache.cjs');
 const Handler = require('./VersionedCacheHandler.cjs').default as typeof import('./VersionedCacheHandler.cjs').default;
 const pluginDirectory = dirname(import.meta.dirname);
 const exec = promisify(execFile);
@@ -90,10 +90,10 @@ async function inFreshWorker(app: string, version: string, set?: string) {
 		const appRequire = createRequire(join(app, 'package.json'));
 		const { bindVersionedCache } = require(join(plugin, 'dist/versionedCache.cjs'));
 		const Handler = require(join(plugin, 'dist/VersionedCacheHandler.cjs')).default;
-		const binding = bindVersionedCache(app);
 		const ctx = { fs: appRequire('next/dist/server/lib/node-fs-methods.js').nodeFs, serverDistDir: join(app,'.next/server'), flushToDisk:true, maxMemoryCacheSize:0, revalidatedTags:[], experimental:{ppr:false}, appDir:true, pagesDir:true };
 		const getCtx = { kind:'APP_PAGE', kindHint:'app', isFallback:false, isRoutePPREnabled:false };
 		(async () => {
+			const binding = await bindVersionedCache(app);
 			const cache = new Handler(ctx);
 			if (html) await cache.set(key, version === 'next-14' ? {kind:'PAGE',html,pageData:html,headers:{'x-test':html}} : {kind:'APP_PAGE',html,rscData:Buffer.from(html),headers:{'x-test':html}}, getCtx);
 			const entry = await cache.get(key,getCtx);
@@ -107,7 +107,7 @@ async function inFreshWorker(app: string, version: string, set?: string) {
 for (const version of versions) describe(`versioned filesystem cache (${version})`, () => {
 	it('pins late writes to the old build and persists the new cache across worker restarts', async (t) => {
 		const { root, app } = await temporaryApp(t, version);
-		const oldBinding = bindVersionedCache(app)!;
+		const oldBinding = (await bindVersionedCache(app))!;
 		const old = new Handler(context(app));
 		await old.set(pageKey(version), pageValue(version, 'v1 early') as never, pageContext as never);
 		await rename(app, join(root, 'aside'));
@@ -122,9 +122,8 @@ for (const version of versions) describe(`versioned filesystem cache (${version}
 		assert.notEqual(fresh.directory, oldBinding.cacheDirectory, 'reusing BUILD_ID must not merge different artifacts');
 		assert.equal(existsSync(join(app, '.next', 'server', 'route-cache')), false);
 		assert.equal(existsSync(join(app, '.next', 'server', 'app', 'isr.html')), false);
-		assert.throws(() => assertVersionedCacheBuild(oldBinding), /build changed/);
-		assert.throws(() => bindVersionedCache(app), /restart the worker/);
-		assert.equal(await sweepVersionedCache(oldBinding), 0, 'an outgoing worker must not sweep the new build');
+		await assert.rejects(() => assertVersionedCacheBuild(oldBinding), /build changed/);
+		await assert.rejects(() => bindVersionedCache(app), /restart the worker/);
 		await rm(oldBinding.cacheDirectory, { recursive: true });
 		await old.set(pageKey(version), pageValue(version, 'v1 recreated') as never, pageContext as never);
 		assert.equal(await pageHTML(anotherOldRequest, pageKey(version)), 'v1 recreated');
@@ -135,8 +134,8 @@ for (const version of versions) describe(`versioned filesystem cache (${version}
 		const { root, app } = await temporaryApp(t, version);
 		const secondApp = join(root, 'components', 'second');
 		await createApp(secondApp, version, 'v1');
-		const firstBinding = bindVersionedCache(app)!;
-		const secondBinding = bindVersionedCache(secondApp)!;
+		const firstBinding = (await bindVersionedCache(app))!;
+		const secondBinding = (await bindVersionedCache(secondApp))!;
 		assert.strictEqual(firstBinding.FileSystemCache, secondBinding.FileSystemCache);
 		const first = new Handler(context(app));
 		const second = new Handler(context(secondApp));
@@ -150,7 +149,7 @@ for (const version of versions) describe(`versioned filesystem cache (${version}
 	it('uses immutable build seeds on cold misses without combining partial runtime files', async (t) => {
 		const { app } = await temporaryApp(t, version);
 		await seed(app, version, 'seed');
-		const binding = bindVersionedCache(app)!;
+		const binding = (await bindVersionedCache(app))!;
 		const cache = new Handler(context(app));
 		assert.equal(await pageHTML(cache, pageKey(version)), 'seed');
 		const runtimePrimary = version === 'next-16-route-cache'
@@ -160,7 +159,7 @@ for (const version of versions) describe(`versioned filesystem cache (${version}
 		await writeFile(runtimePrimary, 'incomplete runtime');
 		assert.equal(await pageHTML(cache, pageKey(version)), 'seed');
 		assert.equal(await readFile(join(app, '.next', 'server', 'app', 'isr.html'), 'utf8'), 'seed');
-		assertVersionedCacheBuild(binding);
+		await assertVersionedCacheBuild(binding);
 	});
 
 	it('keeps fetch seeds read-only and persists runtime fetches outside the component', async (t) => {
@@ -171,14 +170,16 @@ for (const version of versions) describe(`versioned filesystem cache (${version}
 		await new Native(context(app)).set('fetch-key', data, fetchContext);
 		const seedFile = join(app, '.next', 'cache', 'fetch-cache', 'fetch-key');
 		const original = await readFile(seedFile, 'utf8');
-		const binding = bindVersionedCache(app)!;
+		const binding = (await bindVersionedCache(app))!;
 		const cache = new Handler(context(app));
 		const result = await cache.get('fetch-key', { ...fetchContext, tags: ['another-tag'] } as never);
 		assert.equal(result?.value?.kind, 'FETCH');
 		assert.equal(await readFile(seedFile, 'utf8'), original);
+		const disabled = new Handler({ ...context(app), flushToDisk: false });
+		assert.equal(await disabled.get('fetch-key', fetchContext as never), null);
 		await cache.set('fetch-key', { ...data, data: { ...data.data, body: 'runtime' } } as never, fetchContext as never);
 		assert.match(await readFile(join(binding.cacheDirectory, 'cache', 'fetch-cache', 'fetch-key'), 'utf8'), /runtime/);
-		assertVersionedCacheBuild(binding);
+		await assertVersionedCacheBuild(binding);
 	});
 
 	it('leaves external builds and development on the stock filesystem when unbound', async (t) => {
@@ -190,7 +191,7 @@ for (const version of versions) describe(`versioned filesystem cache (${version}
 
 	it('persists Pages Router data and route-handler bodies in the namespace', async (t) => {
 		const { app } = await temporaryApp(t, version);
-		const binding = bindVersionedCache(app)!;
+		const binding = (await bindVersionedCache(app))!;
 		const cache = new Handler(context(app));
 		const pages = { kind: version === 'next-14' ? 'PAGE' : 'PAGES', html: 'pages', pageData: { release: 'v1' }, headers: { 'x-test': 'pages' } };
 		const pagesContext = { kind: 'PAGES', kindHint: 'pages', isFallback: false };
@@ -212,12 +213,12 @@ for (const version of versions) describe(`versioned filesystem cache (${version}
 		assert.equal(body.value.body.toString(), 'route body');
 		assert.equal(existsSync(join(app, '.next', 'server', 'pages')), false);
 		assert.equal(existsSync(join(app, '.next', 'server', 'app', 'route.body')), false);
-		assertVersionedCacheBuild(binding);
+		await assertVersionedCacheBuild(binding);
 	});
 
 	it('preserves the installed Next version\'s tag expiration', async (t) => {
 		const { app } = await temporaryApp(t, version);
-		bindVersionedCache(app);
+		await bindVersionedCache(app);
 		const cache = new Handler(context(app));
 		const tag = app;
 		const value = { ...pageValue(version, 'tagged'), headers: { 'x-next-cache-tags': tag } };
@@ -226,6 +227,22 @@ for (const version of versions) describe(`versioned filesystem cache (${version}
 		await cache.revalidateTag(tag);
 		assert.equal(await cache.get(pageKey(version), pageContext), null);
 		cache.resetRequestCache();
+	});
+
+	it('does not resurrect build seeds after runtime-only tag invalidation, even in another handler or worker', async (t) => {
+		const { app } = await temporaryApp(t, version);
+		await seed(app, version, 'seed');
+		const binding = (await bindVersionedCache(app))!;
+		const cache = new Handler(context(app));
+		const tag = app;
+		await cache.set(pageKey(version), { ...pageValue(version, 'runtime'), headers: { 'x-next-cache-tags': tag } } as never, pageContext as never);
+		assert.equal(await pageHTML(cache, pageKey(version)), 'runtime');
+		await cache.revalidateTag(tag);
+		assert.equal(await cache.get(pageKey(version), pageContext), null);
+		assert.equal(await new Handler(context(app)).get(pageKey(version), pageContext), null);
+		await rm(join(binding.cacheDirectory, 'server'), { recursive: true });
+		assert.equal((await inFreshWorker(app, version)).html, undefined, 'a persisted runtime-owned key must not fall back to seeds');
+		await assertVersionedCacheBuild(binding);
 	});
 });
 
@@ -236,7 +253,7 @@ describe('versioned cache startup and retention', () => {
 		markProductionCache(ctx.serverDistDir);
 		assert.throws(() => new Handler(ctx), /no production build binding/);
 		assert.doesNotThrow(() => new Handler({ ...ctx, dev: true }));
-		const binding = bindVersionedCache(app)!;
+		const binding = (await bindVersionedCache(app))!;
 		assert.ok(Object.isFrozen(binding));
 		assert.doesNotThrow(() => new Handler(ctx));
 		const dev = new Handler({ ...ctx, dev: true });
@@ -248,31 +265,69 @@ describe('versioned cache startup and retention', () => {
 		const { app } = await temporaryApp(t, 'next-16');
 		const file = join(app, '.next', 'required-server-files.json');
 		await writeFile(file, '{"config":{}}');
-		assert.equal(bindVersionedCache(app), undefined);
+		assert.equal(await bindVersionedCache(app), undefined);
 		await writeFile(file, '{"config":{"cacheHandler":"/custom/handler.cjs"}}');
-		assert.equal(bindVersionedCache(app), undefined);
+		assert.equal(await bindVersionedCache(app), undefined);
+	});
+
+	it('rejects build/runtime handler mismatches before serving', async (t) => {
+		const { app } = await temporaryApp(t, 'next-16');
+		const config = { cacheHandler: join(app, 'node_modules', '@harperfast', 'nextjs', 'dist', 'VersionedCacheHandler.cjs') };
+		const binding = (await bindVersionedCache(app))!;
+		assert.doesNotThrow(() => assertVersionedCacheConfig(app, config, binding));
+		assert.doesNotThrow(() => assertVersionedCacheConfig(app, {}));
+		assert.throws(() => assertVersionedCacheConfig(app, config), /configuration mismatch/);
+		assert.throws(() => assertVersionedCacheConfig(app, {}, binding), /configuration mismatch/);
+		assert.throws(() => assertVersionedCacheConfig(app, { ...config, distDir: 'other' }, binding), /configuration mismatch/);
 	});
 
 	it('rejects a cache root inside the component and reports storage failures at startup', async (t) => {
 		const { root, app } = await temporaryApp(t, 'next-16');
-		assert.throws(() => bindVersionedCache(app, 'runtime-cache'), /outside the component/);
+		await assert.rejects(() => bindVersionedCache(app, 'runtime-cache'), /outside the component/);
 		const blockedRoot = join(root, 'file');
 		await writeFile(blockedRoot, 'not a directory');
-		assert.throws(() => bindVersionedCache(app, blockedRoot), /ENOTDIR/);
+		await assert.rejects(() => bindVersionedCache(app, blockedRoot), /ENOTDIR/);
+	});
+
+	it('prevents unowned runtime writes and seed fallback when ownership storage is inaccessible', async (t) => {
+		const version = 'next-16';
+		const { app } = await temporaryApp(t, version);
+		await seed(app, version, 'seed');
+		const binding = (await bindVersionedCache(app))!;
+		await writeFile(join(binding.cacheDirectory, 'entries'), 'blocked');
+		const cache = new Handler(context(app));
+		await assert.rejects(cache.set(pageKey(version), pageValue(version, 'runtime') as never, pageContext as never), /ENOTDIR/);
+		assert.deepEqual(await readdir(join(binding.cacheDirectory, 'server')), []);
+		await assert.rejects(cache.get(pageKey(version), pageContext), /ENOTDIR/);
+		await assertVersionedCacheBuild(binding);
 	});
 
 	it('accepts a moved prebuilt artifact whose stored handler path names its build machine', async (t) => {
 		const { app, root } = await temporaryApp(t, 'next-16');
 		const moved = join(root, 'moved-app');
 		await rename(app, moved);
-		assert.ok(bindVersionedCache(moved));
+		assert.ok(await bindVersionedCache(moved));
+	});
+
+	it('resolves a hoisted Next installation for both the constructor and build identity', async (t) => {
+		const version = 'next-16';
+		const { app } = await temporaryApp(t, version);
+		await rm(join(app, 'node_modules', 'next'));
+		const sharedModules = join(dirname(app), 'node_modules');
+		await mkdir(sharedModules);
+		await symlink(dirname(require.resolve(`${version}/package.json`)), join(sharedModules, 'next'), 'junction');
+		const binding = (await bindVersionedCache(app))!;
+		const cache = new Handler(context(app));
+		await cache.set(pageKey(version), pageValue(version, 'hoisted') as never, pageContext as never);
+		assert.equal(await pageHTML(cache, pageKey(version)), 'hoisted');
+		await assertVersionedCacheBuild(binding);
 	});
 
 	it('separates builds whose only difference is prerendered seed data', async (t) => {
 		const version = 'next-16-route-cache';
 		const { app, root } = await temporaryApp(t, version);
 		await seed(app, version, 'old seed');
-		const binding = bindVersionedCache(app)!;
+		const binding = (await bindVersionedCache(app))!;
 		await rename(app, join(root, 'aside'));
 		await createApp(app, version, 'v1');
 		await seed(app, version, 'new seed');
@@ -281,21 +336,6 @@ describe('versioned cache startup and retention', () => {
 		assert.notEqual(fresh.directory, binding.cacheDirectory);
 	});
 
-	it('sweeps only recognized older namespaces of this app', async (t) => {
-		const { app, root } = await temporaryApp(t, 'next-16');
-		const binding = bindVersionedCache(app)!;
-		const otherBuild = join(dirname(binding.cacheDirectory), 'a'.repeat(64));
-		const otherApp = join(root, '.nextjs-cache', 'unrelated-app', 'b'.repeat(64));
-		const unrelated = join(dirname(binding.cacheDirectory), 'keep-me');
-		await mkdir(otherBuild, { recursive: true });
-		await mkdir(otherApp, { recursive: true });
-		await mkdir(unrelated);
-		assert.equal(await sweepVersionedCache(binding), 1);
-		assert.equal(existsSync(otherBuild), false);
-		assert.ok(existsSync(binding.cacheDirectory));
-		assert.ok(existsSync(otherApp));
-		assert.ok(existsSync(unrelated));
-	});
 });
 
 it('does not import a legacy route-cache entry or promote a build seed into the component', async (t) => {
@@ -304,9 +344,9 @@ it('does not import a legacy route-cache entry or promote a build seed into the 
 	await seed(app, version, 'new seed');
 	const Native = require(`${version}/dist/server/lib/incremental-cache/file-system-cache.js`).default;
 	await new Native(context(app)).set(pageKey(version), pageValue(version, 'legacy old render'), pageContext);
-	const binding = bindVersionedCache(app)!;
+	const binding = (await bindVersionedCache(app))!;
 	const cache = new Handler(context(app));
 	assert.equal(await pageHTML(cache, pageKey(version)), 'new seed');
 	assert.equal(binding.seedFs.existsSync(join(app, '.next', 'server', pageKey(version) + '.html')), false);
-	assertVersionedCacheBuild(binding);
+	await assertVersionedCacheBuild(binding);
 });
