@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { open, readdir } from 'node:fs/promises';
+import { open, readdir, realpath } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type FileSystemCache from 'next/dist/server/lib/incremental-cache/file-system-cache.js';
 import type { CacheFs } from 'next/dist/shared/lib/utils.js';
@@ -91,11 +91,26 @@ function seedFileSystem(fs: CacheFs, serverDistDir: string): CacheFs {
 function usesVersionedCache(appDirectory: string, cacheHandler?: string): boolean {
 	if (!cacheHandler || basename(cacheHandler.replace(/\\/g, '/')) !== 'VersionedCacheHandler.cjs') return false;
 	const nativeRequire = createRequire(join(appDirectory, 'package.json'));
-	const handler = join(appDirectory, 'node_modules', '@harperfast', 'nextjs', 'dist', 'VersionedCacheHandler.cjs');
 	const packagedHandler = cacheHandler.replace(/\\/g, '/').endsWith('/node_modules/@harperfast/nextjs/dist/VersionedCacheHandler.cjs');
 	if (packagedHandler) return true;
-	if (!existsSync(handler)) return false;
-	return nativeRequire.resolve(resolve(appDirectory, cacheHandler)) === nativeRequire.resolve(handler);
+	return nativeRequire.resolve(resolve(appDirectory, cacheHandler)) === require.resolve('./VersionedCacheHandler.cjs');
+}
+
+async function resolveCacheRoot(directory: string): Promise<string> {
+	try {
+		return await realpath(directory);
+	} catch (error) {
+		const parent = dirname(directory);
+		if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || parent === directory) throw error;
+		return join(await resolveCacheRoot(parent), basename(directory));
+	}
+}
+
+function assertExternalCacheRoot(appDirectory: string, cacheRoot: string): void {
+	const cacheRelative = relative(appDirectory, cacheRoot);
+	if (!cacheRelative || (!isAbsolute(cacheRelative) && !cacheRelative.startsWith('..' + sep) && cacheRelative !== '..')) {
+		throw new Error(`Next.js cacheDirectory must be outside the component directory: ${cacheRoot}`);
+	}
 }
 
 export async function bindVersionedCache(appDirectory: string, cacheDirectory?: string): Promise<CacheBinding | undefined> {
@@ -111,11 +126,10 @@ export async function bindVersionedCache(appDirectory: string, cacheDirectory?: 
 	if (!cacheDirectory && basename(dirname(appDirectory)) !== 'components') {
 		throw new Error(`Set cacheDirectory for a Next.js app outside <harper-root>/components/<app>: ${appDirectory}`);
 	}
-	const cacheRoot = cacheDirectory ? resolve(appDirectory, cacheDirectory) : join(dirname(dirname(appDirectory)), '.nextjs-cache');
-	const cacheRelative = relative(appDirectory, cacheRoot);
-	if (!cacheRelative || (!isAbsolute(cacheRelative) && !cacheRelative.startsWith('..' + sep) && cacheRelative !== '..')) {
-		throw new Error(`Next.js cacheDirectory must be outside the component directory: ${cacheRoot}`);
-	}
+	const requestedRoot = cacheDirectory ? resolve(appDirectory, cacheDirectory) : join(dirname(dirname(appDirectory)), '.nextjs-cache');
+	assertExternalCacheRoot(appDirectory, requestedRoot);
+	const cacheRoot = await resolveCacheRoot(requestedRoot);
+	assertExternalCacheRoot(await realpath(appDirectory), cacheRoot);
 	const FileSystemCache = nativeRequire('next/dist/server/lib/incremental-cache/file-system-cache.js').default;
 	const seedFs = seedFileSystem(nativeRequire('next/dist/server/lib/node-fs-methods.js').nodeFs, serverDistDir);
 	const identity = await buildIdentity(appDirectory, distDirectory);

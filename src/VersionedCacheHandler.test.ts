@@ -1,7 +1,7 @@
 import { describe, it, type TestContext } from 'node:test';
 import assert from 'node:assert';
 import { createRequire } from 'node:module';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rename, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rename, rm, symlink, realpath } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -308,6 +308,33 @@ describe('versioned cache startup and retention', () => {
 		await assert.rejects(() => bindVersionedCache(app, blockedRoot), /ENOTDIR/);
 	});
 
+	it('rejects a cache root that physically aliases the component', async (t) => {
+		const { root, app } = await temporaryApp(t, 'next-16');
+		const alias = join(root, 'cache-alias');
+		const server = join(app, '.next', 'server');
+		await symlink(server, alias, 'junction');
+		await assert.rejects(bindVersionedCache(app, join(alias, 'new-cache')), /outside the component/);
+		assert.equal(existsSync(join(server, 'new-cache')), false);
+	});
+
+	it('pins an external cache root before its alias is retargeted', async (t) => {
+		const version = 'next-16';
+		const { root, app } = await temporaryApp(t, version);
+		const externalRoot = join(root, 'external-cache');
+		const alias = join(root, 'cache-alias');
+		await mkdir(externalRoot);
+		await symlink(externalRoot, alias, 'junction');
+		const binding = (await bindVersionedCache(app, join(alias, 'new-cache')))!;
+		assert.ok(binding.cacheDirectory.startsWith(join(await realpath(externalRoot), 'new-cache')));
+		await rm(alias);
+		await symlink(join(app, '.next', 'server'), alias, 'junction');
+		const cache = new Handler(context(app));
+		await cache.set(pageKey(version), pageValue(version, 'external') as never, pageContext as never);
+		assert.equal(await pageHTML(cache, pageKey(version)), 'external');
+		assert.equal(existsSync(join(app, '.next', 'server', 'new-cache')), false);
+		await assertVersionedCacheBuild(binding);
+	});
+
 	it('prevents unowned runtime writes and seed fallback when ownership storage is inaccessible', async (t) => {
 		const version = 'next-16';
 		const { app } = await temporaryApp(t, version);
@@ -340,6 +367,25 @@ describe('versioned cache startup and retention', () => {
 		const cache = new Handler(context(app));
 		await cache.set(pageKey(version), pageValue(version, 'hoisted') as never, pageContext as never);
 		assert.equal(await pageHTML(cache, pageKey(version)), 'hoisted');
+		await assertVersionedCacheBuild(binding);
+	});
+
+	it('binds the actual handler path when the plugin is linked in a parent workspace', async (t) => {
+		const version = 'next-16';
+		const { app, root } = await temporaryApp(t, version);
+		await rm(join(app, 'node_modules', '@harperfast', 'nextjs'));
+		const sharedModules = join(root, 'node_modules', '@harperfast');
+		await mkdir(sharedModules, { recursive: true });
+		await symlink(pluginDirectory, join(sharedModules, 'nextjs'), 'junction');
+		const appRequire = createRequire(join(app, 'package.json'));
+		const cacheHandler = join(dirname(appRequire.resolve('@harperfast/nextjs')), 'VersionedCacheHandler.cjs');
+		await writeFile(join(app, '.next', 'required-server-files.json'), JSON.stringify({ config: { cacheHandler } }));
+		const binding = (await bindVersionedCache(app))!;
+		assert.ok(binding);
+		assert.doesNotThrow(() => assertVersionedCacheConfig(app, { cacheHandler }, binding));
+		const cache = new Handler(context(app));
+		await cache.set(pageKey(version), pageValue(version, 'workspace') as never, pageContext as never);
+		assert.equal(await pageHTML(cache, pageKey(version)), 'workspace');
 		await assertVersionedCacheBuild(binding);
 	});
 

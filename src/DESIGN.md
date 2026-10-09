@@ -10,6 +10,8 @@ The artifact digest includes build seeds, manifests, compiled server files and N
 
 Artifact hashing reads bounded chunks asynchronously before serving and after prepare; it yields between file operations and never runs from a request or cleanup timer. The installed Next constructor is captured before hashing; package metadata uses Node resolution to support a hoisted Next installation.
 
+The cache root resolves existing ancestors through `realpath` before directory creation; both its configured and physical paths must be outside the component. Capturing that physical root prevents later alias retargeting from redirecting worker writes. Missing descendants remain supported; other filesystem errors propagate at startup.
+
 Namespaces and ownership markers are retained for operator-managed cleanup after their workers stop. No automatic cache sweep is added: a pre-delete liveness check cannot exclude a concurrent activation, and removing ownership markers while a worker serves can revive older seeds after invalidation.
 
 `VersionedCacheHandler.test.ts` exercises installed Next14/15/16 caches against real files and fresh processes. `integrationTests/next-16-versioned-cache.pw.ts` holds a real regeneration across the swap and verifies the new build and persistence after restarts.
