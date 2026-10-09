@@ -2,13 +2,19 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { createRequire } from 'node:module';
 
-const { withHarper, cacheHandlerPath, useCacheHandlerPath } = createRequire(import.meta.url)('./withHarper.cjs') as {
+const { withHarper, cacheHandlerPath, useCacheHandlerPath, versionedCacheHandlerPath } = createRequire(import.meta.url)('./withHarper.cjs') as {
 	withHarper(config?: Record<string, unknown>, options?: { useCache?: boolean; configDir?: string }): Record<string, unknown>;
 	cacheHandlerPath(configDir: string): string;
 	useCacheHandlerPath(configDir: string): string;
+	versionedCacheHandlerPath(configDir: string): string;
 };
 
 describe('handler paths', () => {
+	it('resolves filesystem isolation independently of the Harper-backed handlers', () => {
+		assert.match(versionedCacheHandlerPath('/app'), /node_modules.*@harperfast.*nextjs.*dist.*VersionedCacheHandler\.cjs$/);
+		assert.notEqual(versionedCacheHandlerPath('/app'), cacheHandlerPath('/app'));
+		assert.notEqual(versionedCacheHandlerPath('/app'), useCacheHandlerPath('/app'));
+	});
 	it('resolves the two handlers to different modules', () => {
 		// The ISR handler and the "use cache" handler implement different Next.js interfaces; pointing
 		// `cacheHandlers` at the ISR one would silently do nothing.

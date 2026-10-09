@@ -12,6 +12,10 @@ export function cacheHandlerPath(configDir: string): string {
 	return join(configDir, 'node_modules', '@harperfast', 'nextjs', 'dist', 'CacheHandler.cjs');
 }
 
+export function versionedCacheHandlerPath(configDir: string): string {
+	return join(configDir, 'node_modules', '@harperfast', 'nextjs', 'dist', 'VersionedCacheHandler.cjs');
+}
+
 /**
  * Returns the path to the Harper "use cache" handler, resolved the same way as `cacheHandlerPath`.
  *

@@ -171,6 +171,10 @@ When enabled, the plugin will look for an existing `.next` directory and skip th
 
 Build the Next.js application and then exit (including shutting down Harper). Defaults to `false`.
 
+### `cacheDirectory: string`
+
+Root for the opt-in [versioned filesystem cache](#versioned-filesystem-cache), outside the component directory. Defaults to `<harper-root>/.nextjs-cache` for the standard `<harper-root>/components/<app>` layout. Set an absolute path for other layouts or a separate volume; relative paths resolve from the app directory and must still point outside it.
+
 ### `port: number`
 
 Specify a custom HTTP port for the Next.js server. Defaults to the Harper default port (`9926`).
@@ -189,6 +193,48 @@ The `files` option is now optional with plugins. This make configuration simpler
 
 Glob pattern specifying which files Harper should watch for changes. Example: `'/app/*'`.
 -->
+
+## Versioned filesystem cache
+
+To keep Next.js's incremental render and data caches on disk while isolating deployments, use `versionedCacheHandlerPath()` in `next.config.mjs` or `next.config.ts`:
+
+```js
+import { withHarper, versionedCacheHandlerPath } from '@harperfast/nextjs';
+
+export default withHarper({
+	cacheHandler: versionedCacheHandlerPath(import.meta.dirname),
+});
+```
+
+For CommonJS configs, use `require('@harperfast/nextjs')` and pass `__dirname` instead. This is opt-in and replaces the incremental `cacheHandler`; choose it or the Harper-backed handler below. It does not register the separate `cacheHandlers` interface used by `'use cache'`.
+
+Each production worker captures its build identity before serving. Runtime HTML, RSC, route-handler bodies, Pages Router JSON, and fetch-cache writes go to a directory outside the replaceable component tree. For `~/harper/components/my-app`, the default is:
+
+```text
+~/harper/.nextjs-cache/<app-path-hash>/<build-artifact-hash>/
+```
+
+The identity includes `BUILD_ID` and a digest of the build artifacts, so changing an artifact still separates its cache when `generateBuildId` returns the same ID. Startup reads those files asynchronously twice, before and after Next prepares; its I/O cost grows with build size. The build and runtime configuration must both select this handler with the default `.next` output directory; a mismatch fails startup. Cache contents survive worker restarts and are shared by workers of that app/build on the same filesystem. This is local disk storage; it does not replicate entries across cluster nodes or broadcast tag invalidations between workers or nodes. Next.js's installed filesystem-cache implementation supplies the cache formats and invalidation behavior.
+
+Set `cacheMaxMemorySize: 0` in every app sharing a physical Next.js installation, then restart the workers. Next.js's process-local LRU uses unqualified keys and, once another app initializes it, can also be used by an app configured with zero memory. For a single app using its own Next installation, you can omit that setting and keep Next's memory-cache default. This handler isolates disk caches, not that shared LRU. Disk caching remains enabled. Development and builds outside the Harper plugin retain Next.js's normal filesystem behavior.
+
+For a custom component layout or a separate cache volume, set the plugin's `cacheDirectory` in `config.yaml` to an absolute path outside the component directory:
+
+```yaml
+'@harperfast/nextjs':
+  package: '@harperfast/nextjs'
+  cacheDirectory: /var/cache/harper-nextjs
+```
+
+Build seeds remain read-only in `.next`; cold whole-entry misses can read them without combining their files with partial runtime entries. Once a runtime write takes ownership of a key, a persisted marker prevents invalidated or missing entries from falling back to an older seed; Next.js must regenerate them. Legacy `.next/server/route-cache` entries are ignored. Stop outgoing stock-cache workers before the first deployment using this handler: they can overwrite render seeds on Next.js 14/15/16.2 and fetch seeds on all supported versions. Subsequent rolling deployments need the outgoing workers already using this handler. Existing contaminated build seeds require a clean deployment.
+
+The plugin resolves existing cache-root symlinks at startup, rejects roots that point inside the component, and captures the resolved external path. Retargeting a configured alias afterward does not redirect an existing worker's cache writes.
+
+Persistence covers worker restarts and retains Next.js's unsynced filesystem writes; it does not add power-loss durability. Versioning applies when Harper's plugin serves production; standalone Next.js serving keeps stock caching.
+
+This isolates incremental-cache writes. It does not isolate arbitrary app-code reads after a directory swap, move image-optimization caches, or change the Harper-backed and `'use cache'` handlers. Build artifacts under `.next/server` and initial `.next/cache/fetch-cache` must contain regular files and directories.
+
+Namespaces are retained, including after dropping an app. Debug startup logs identify the bound cache directory. Plan disk capacity and remove unused namespaces while their workers are stopped. There is no automatic cache sweep: removing ownership markers while a worker is serving could revive older seeds after tag invalidation. The existing `HARPER_NEXTJS_SWEEP_OLD_BUILDS` option continues to control static-build cleanup only.
 
 ## Caching (Work In Progress)
 
