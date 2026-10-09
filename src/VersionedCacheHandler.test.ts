@@ -289,6 +289,17 @@ describe('versioned cache startup and retention', () => {
 		assert.doesNotThrow(() => assertVersionedCacheConfig(app, { cacheHandler }));
 	});
 
+	it('ignores a vanished build-machine path for an unrelated runtime handler', async (t) => {
+		const { app, root } = await temporaryApp(t, 'next-16');
+		const cacheHandler = join(app, 'VersionedCacheHandler.cjs');
+		await writeFile(cacheHandler, 'module.exports = class CustomCache {};');
+		await writeFile(join(app, '.next', 'required-server-files.json'), JSON.stringify({ config: {
+			cacheHandler: join(root, 'build-machine', 'VersionedCacheHandler.cjs'),
+		} }));
+		assert.equal(await bindVersionedCache(app), undefined);
+		assert.doesNotThrow(() => assertVersionedCacheConfig(app, { cacheHandler }));
+	});
+
 	it('rejects build/runtime handler mismatches before serving', async (t) => {
 		const { app } = await temporaryApp(t, 'next-16');
 		const config = { cacheHandler: join(app, 'node_modules', '@harperfast', 'nextjs', 'dist', 'VersionedCacheHandler.cjs') };
