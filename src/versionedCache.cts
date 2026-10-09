@@ -93,7 +93,9 @@ function usesVersionedCache(appDirectory: string, cacheHandler?: string): boolea
 	const nativeRequire = createRequire(join(appDirectory, 'package.json'));
 	const handler = join(appDirectory, 'node_modules', '@harperfast', 'nextjs', 'dist', 'VersionedCacheHandler.cjs');
 	const packagedHandler = cacheHandler.replace(/\\/g, '/').endsWith('/node_modules/@harperfast/nextjs/dist/VersionedCacheHandler.cjs');
-	return packagedHandler || nativeRequire.resolve(resolve(appDirectory, cacheHandler)) === nativeRequire.resolve(handler);
+	if (packagedHandler) return true;
+	if (!existsSync(handler)) return false;
+	return nativeRequire.resolve(resolve(appDirectory, cacheHandler)) === nativeRequire.resolve(handler);
 }
 
 export async function bindVersionedCache(appDirectory: string, cacheDirectory?: string): Promise<CacheBinding | undefined> {

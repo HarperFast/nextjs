@@ -279,6 +279,16 @@ describe('versioned cache startup and retention', () => {
 		assert.equal(await bindVersionedCache(app), undefined);
 	});
 
+	it('leaves same-named custom handlers untouched without a local plugin installation', async (t) => {
+		const { app } = await temporaryApp(t, 'next-16');
+		await rm(join(app, 'node_modules', '@harperfast', 'nextjs'));
+		const cacheHandler = join(app, 'VersionedCacheHandler.cjs');
+		await writeFile(cacheHandler, 'module.exports = class CustomCache {};');
+		await writeFile(join(app, '.next', 'required-server-files.json'), JSON.stringify({ config: { cacheHandler } }));
+		assert.equal(await bindVersionedCache(app), undefined);
+		assert.doesNotThrow(() => assertVersionedCacheConfig(app, { cacheHandler }));
+	});
+
 	it('rejects build/runtime handler mismatches before serving', async (t) => {
 		const { app } = await temporaryApp(t, 'next-16');
 		const config = { cacheHandler: join(app, 'node_modules', '@harperfast', 'nextjs', 'dist', 'VersionedCacheHandler.cjs') };

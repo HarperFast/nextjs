@@ -228,7 +228,9 @@ For a custom component layout or a separate cache volume, set the plugin's `cach
 
 Build seeds remain read-only in `.next`; cold whole-entry misses can read them without combining their files with partial runtime entries. Once a runtime write takes ownership of a key, a persisted marker prevents invalidated or missing entries from falling back to an older seed; Next.js must regenerate them. Legacy `.next/server/route-cache` entries are ignored. Stop outgoing stock-cache workers before the first deployment using this handler: they can overwrite render seeds on Next.js 14/15/16.2 and fetch seeds on all supported versions. Subsequent rolling deployments need the outgoing workers already using this handler. Existing contaminated build seeds require a clean deployment.
 
-This isolates incremental-cache writes. It does not isolate arbitrary app-code reads after a directory swap, move image-optimization caches, or change the Harper-backed and `'use cache'` handlers. Builds must contain regular files and directories under `.next/server`.
+Persistence covers worker restarts and retains Next.js's unsynced filesystem writes; it does not add power-loss durability. Versioning applies when Harper's plugin serves production; standalone Next.js serving keeps stock caching.
+
+This isolates incremental-cache writes. It does not isolate arbitrary app-code reads after a directory swap, move image-optimization caches, or change the Harper-backed and `'use cache'` handlers. Build artifacts under `.next/server` and initial `.next/cache/fetch-cache` must contain regular files and directories.
 
 Namespaces are retained, including after dropping an app. Debug startup logs identify the bound cache directory. Plan disk capacity and remove unused namespaces while their workers are stopped. There is no automatic cache sweep: removing ownership markers while a worker is serving could revive older seeds after tag invalidation. The existing `HARPER_NEXTJS_SWEEP_OLD_BUILDS` option continues to control static-build cleanup only.
 
