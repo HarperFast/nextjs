@@ -2,14 +2,12 @@ import { describe, it, after, before } from 'node:test';
 import assert from 'node:assert';
 import { createRequire } from 'node:module';
 import { createServer as createHttpServer, request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http';
-import { connect, createServer as createHttp2Server, type Http2Server } from 'node:http2';
+import { connect, constants, createServer as createHttp2Server, type Http2Server } from 'node:http2';
 import type { AddressInfo } from 'node:net';
 import { gunzipSync } from 'node:zlib';
 
 import { adaptHttp2ForNext } from './http2Compat.js';
 
-// The middleware Next.js wraps every response in (`compress: true`, its default). Driving the real one
-// is what proves the response half of the fix.
 const compression = createRequire(import.meta.url)('next-16/dist/compiled/compression');
 
 const BODY = 'x'.repeat(4096);
@@ -26,6 +24,7 @@ async function getHttp2(url: string, headers: Record<string, string> = {}) {
 	const client = connect(url);
 	try {
 		return await new Promise<{ status: number; headers: Record<string, any>; body: Buffer }>((resolve, reject) => {
+			client.on('error', reject);
 			const stream = client.request({ ':path': '/', ...headers });
 			const chunks: Buffer[] = [];
 			let responseHeaders: Record<string, any> = {};
@@ -61,8 +60,9 @@ function compressedHandler(adapt: boolean, onError?: (error: Error) => void): Ha
 
 describe('adaptHttp2ForNext', () => {
 	describe('over HTTP/2', () => {
-		let observed: { hasOwnProperty: string; host: boolean } | undefined;
+		let observed: { hasOwnProperty: string; ownAuthority: boolean; host: string; authority: string } | undefined;
 		let unadaptedHasOwnProperty: string | undefined;
+		let unadaptedHost: string | undefined;
 		let unadaptedError: Error | undefined;
 		const servers: Http2Server[] = [];
 		let headersURL: string;
@@ -74,13 +74,16 @@ describe('adaptHttp2ForNext', () => {
 				adaptHttp2ForNext(request, response);
 				observed = {
 					hasOwnProperty: typeof request.headers.hasOwnProperty,
-					host: request.headers.hasOwnProperty(':authority'),
+					ownAuthority: request.headers.hasOwnProperty(':authority'),
+					host: request.headers.host,
+					authority: request.headers[':authority'],
 				};
 				response.end();
 			});
 			const adapted = await listenHttp2(compressedHandler(true));
 			const unadapted = await listenHttp2((request, response) => {
 				unadaptedHasOwnProperty = typeof request.headers.hasOwnProperty;
+				unadaptedHost = request.headers.host;
 				compressedHandler(false, (error) => (unadaptedError = error))(request, response);
 			});
 			servers.push(headers.server, adapted.server, unadapted.server);
@@ -96,7 +99,19 @@ describe('adaptHttp2ForNext', () => {
 		it('gives request headers the Object prototype Next.js calls hasOwnProperty on', async () => {
 			const response = await getHttp2(headersURL);
 			assert.strictEqual(response.status, 200);
-			assert.deepStrictEqual(observed, { hasOwnProperty: 'function', host: true });
+			assert.strictEqual(observed?.hasOwnProperty, 'function');
+			assert.strictEqual(observed?.ownAuthority, true);
+		});
+
+		it('fills host from :authority, which HTTP/2 sends in its place', async () => {
+			await getHttp2(headersURL);
+			assert.ok(observed?.authority);
+			assert.strictEqual(observed?.host, observed?.authority);
+		});
+
+		it('keeps a host header the client sent', async () => {
+			await getHttp2(headersURL, { host: 'example.test' });
+			assert.strictEqual(observed?.host, 'example.test');
 		});
 
 		it("lets Next.js's compression middleware write a gzipped response", async () => {
@@ -113,10 +128,40 @@ describe('adaptHttp2ForNext', () => {
 			assert.strictEqual(response.body.toString(), BODY);
 		});
 
-		it('is needed: unadapted, headers lack hasOwnProperty and the compression middleware throws', async () => {
+		it('is needed: unadapted, headers lack hasOwnProperty and host, and the compression middleware throws', async () => {
 			await getHttp2(unadaptedURL, { 'accept-encoding': 'gzip' });
 			assert.strictEqual(unadaptedHasOwnProperty, 'undefined');
+			assert.strictEqual(unadaptedHost, undefined);
 			assert.match(unadaptedError?.message ?? '', /_implicitHeader is not a function/);
+		});
+
+		it('does not throw when the client has already reset the stream', async () => {
+			let outcome: string | undefined;
+			const { server, url } = await listenHttp2((request, response) => {
+				adaptHttp2ForNext(request, response);
+				request.stream.on('close', () => {
+					try {
+						response._implicitHeader();
+						outcome = 'ok';
+					} catch (error) {
+						outcome = (error as NodeJS.ErrnoException).code;
+					}
+				});
+			});
+			try {
+				const client = connect(url);
+				const stream = client.request({ ':path': '/' });
+				stream.on('error', () => {});
+				await new Promise<void>((resolve) => {
+					stream.on('close', resolve);
+					setTimeout(() => stream.close(constants.NGHTTP2_CANCEL), 20);
+				});
+				client.close();
+				await new Promise((resolve) => setTimeout(resolve, 50));
+				assert.strictEqual(outcome, 'ok');
+			} finally {
+				server.close();
+			}
 		});
 	});
 

@@ -2,8 +2,6 @@ import { connect } from 'node:http2';
 import { gunzipSync } from 'node:zlib';
 import { fixture } from './fixture.ts';
 
-// Harper only speaks HTTP/2 on its secure port, with `http.http2: true`. Browsers ignore Early Hints over
-// HTTP/1.1, so this is the configuration a site serving 103s runs in.
 const { test, expect } = fixture('next-16', { http: { http2: true, mtls: false } });
 
 const SECURE_PORT = 9927;
@@ -12,6 +10,7 @@ async function getHttp2(origin: string, path: string, headers: Record<string, st
 	const client = connect(origin, { rejectUnauthorized: false });
 	try {
 		return await new Promise<{ status: number; headers: Record<string, any>; body: Buffer }>((resolve, reject) => {
+			client.on('error', reject);
 			const stream = client.request({ ':path': path, ...headers });
 			const chunks: Buffer[] = [];
 			let responseHeaders: Record<string, any> = {};
@@ -38,6 +37,7 @@ test('home page renders over HTTP/2', async ({ harper }) => {
 		'accept-encoding': 'gzip',
 	});
 	expect(response.status).toBe(200);
+	expect(response.headers['content-encoding']).toBe('gzip');
 	expect(decode(response)).toContain('Next.js v16');
 });
 

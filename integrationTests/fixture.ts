@@ -33,10 +33,7 @@ export interface FixtureOptions {
 	env?: Record<string, string>;
 	/** Overrides merged over the default `applications` config, e.g. `{ moduleLoader: 'native' }`. */
 	applications?: Record<string, string>;
-	/**
-	 * Harper `http` config, e.g. `{ http2: true, mtls: false }`. Setting `mtls` (even `false`) is what
-	 * makes the harness bind the secure port, at `https://<hostname>:9927`.
-	 */
+	/** Harper `http` config. Setting `mtls`, even to `false`, is what makes the harness bind the secure port (9927). */
 	http?: Record<string, unknown>;
 }
 
