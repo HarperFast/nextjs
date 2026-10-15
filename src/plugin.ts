@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 
 import { withBuildLock } from './buildLock.js';
+import { adaptHttp2ForNext } from './http2Compat.js';
 import { OLD_BUILD_SWEEP_DELAY_MS, oldBuildSweepEnabled, sweepOtherBuilds } from './buildSweep.js';
 
 import type NextModule14 from 'next-14';
@@ -421,10 +422,10 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 
 	scope.server?.http?.(
 		(request, next) => {
-			return request._nodeResponse === undefined
-				? next(request)
-				: // @ts-expect-error - Not sure when the IncomingMessage.url could be undefined ; need to dig into it.
-					requestHandler(request._nodeRequest, request._nodeResponse, urlParse(request._nodeRequest.url, true));
+			if (request._nodeResponse === undefined) return next(request);
+			adaptHttp2ForNext(request._nodeRequest, request._nodeResponse);
+			// @ts-expect-error - Not sure when the IncomingMessage.url could be undefined ; need to dig into it.
+			return requestHandler(request._nodeRequest, request._nodeResponse, urlParse(request._nodeRequest.url, true));
 		},
 		{ runFirst: config.runFirst, port: config.port, securePort: config.securePort }
 	);

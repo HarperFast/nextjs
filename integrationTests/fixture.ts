@@ -33,9 +33,14 @@ export interface FixtureOptions {
 	env?: Record<string, string>;
 	/** Overrides merged over the default `applications` config, e.g. `{ moduleLoader: 'native' }`. */
 	applications?: Record<string, string>;
+	/**
+	 * Harper `http` config, e.g. `{ http2: true, mtls: false }`. Setting `mtls` (even `false`) is what
+	 * makes the harness bind the secure port, at `https://<hostname>:9927`.
+	 */
+	http?: Record<string, unknown>;
 }
 
-export function makeHarperFixture(fixtureName: string, { env, applications }: FixtureOptions = {}) {
+export function makeHarperFixture(fixtureName: string, { env, applications, http }: FixtureOptions = {}) {
 	return async ({}: {}, use: (harper: HarperContext) => Promise<void>) => {
 		const fixturePath = join(import.meta.dirname, '..', 'fixtures', fixtureName);
 		const ctx = createHarperContext(fixtureName);
@@ -57,6 +62,7 @@ export function makeHarperFixture(fixtureName: string, { env, applications }: Fi
 						allowedDirectory: 'any',
 						...applications,
 					},
+					...(http && { http }),
 				},
 			});
 		} catch (error) {
