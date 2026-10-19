@@ -8,7 +8,18 @@ import { gunzipSync } from 'node:zlib';
 
 import { adaptHttp2ForNext } from './http2Compat.js';
 
-const compression = createRequire(import.meta.url)('next-16/dist/compiled/compression');
+const require = createRequire(import.meta.url);
+const compression = require('next-16/dist/compiled/compression');
+const { fromNodeOutgoingHttpHeaders } = require('next-16/dist/server/web/utils.js');
+
+function nextHeadersConversion(headers: unknown): string {
+	try {
+		fromNodeOutgoingHttpHeaders(headers);
+		return 'ok';
+	} catch (error) {
+		return (error as Error).message;
+	}
+}
 
 const BODY = 'x'.repeat(4096);
 
@@ -60,9 +71,12 @@ function compressedHandler(adapt: boolean, onError?: (error: Error) => void): Ha
 
 describe('adaptHttp2ForNext', () => {
 	describe('over HTTP/2', () => {
-		let observed: { hasOwnProperty: string; ownAuthority: boolean; host: string; authority: string } | undefined;
+		let observed:
+			| { hasOwnProperty: string; pseudoHeaders: string[]; host: string; authority: string; url: string; method: string; conversion: string }
+			| undefined;
 		let unadaptedHasOwnProperty: string | undefined;
 		let unadaptedHost: string | undefined;
+		let unadaptedConversion: string | undefined;
 		let unadaptedError: Error | undefined;
 		const servers: Http2Server[] = [];
 		let headersURL: string;
@@ -74,9 +88,12 @@ describe('adaptHttp2ForNext', () => {
 				adaptHttp2ForNext(request, response);
 				observed = {
 					hasOwnProperty: typeof request.headers.hasOwnProperty,
-					ownAuthority: request.headers.hasOwnProperty(':authority'),
+					pseudoHeaders: Object.keys(request.headers).filter((name) => name.startsWith(':')),
 					host: request.headers.host,
-					authority: request.headers[':authority'],
+					authority: request.authority,
+					url: request.url,
+					method: request.method,
+					conversion: nextHeadersConversion(request.headers),
 				};
 				response.end();
 			});
@@ -84,6 +101,7 @@ describe('adaptHttp2ForNext', () => {
 			const unadapted = await listenHttp2((request, response) => {
 				unadaptedHasOwnProperty = typeof request.headers.hasOwnProperty;
 				unadaptedHost = request.headers.host;
+				unadaptedConversion = nextHeadersConversion(request.headers);
 				compressedHandler(false, (error) => (unadaptedError = error))(request, response);
 			});
 			servers.push(headers.server, adapted.server, unadapted.server);
@@ -100,7 +118,14 @@ describe('adaptHttp2ForNext', () => {
 			const response = await getHttp2(headersURL);
 			assert.strictEqual(response.status, 200);
 			assert.strictEqual(observed?.hasOwnProperty, 'function');
-			assert.strictEqual(observed?.ownAuthority, true);
+		});
+
+		it("drops the pseudo-headers Next.js's Headers conversion rejects, keeping url and method", async () => {
+			await getHttp2(headersURL, { ':path': '/api/echo?q=1', ':method': 'GET' });
+			assert.deepStrictEqual(observed?.pseudoHeaders, []);
+			assert.strictEqual(observed?.conversion, 'ok');
+			assert.strictEqual(observed?.url, '/api/echo?q=1');
+			assert.strictEqual(observed?.method, 'GET');
 		});
 
 		it('fills host from :authority, which HTTP/2 sends in its place', async () => {
@@ -128,10 +153,11 @@ describe('adaptHttp2ForNext', () => {
 			assert.strictEqual(response.body.toString(), BODY);
 		});
 
-		it('is needed: unadapted, headers lack hasOwnProperty and host, and the compression middleware throws', async () => {
+		it('is needed: unadapted, headers lack hasOwnProperty and host, Next.js rejects them, and the compression middleware throws', async () => {
 			await getHttp2(unadaptedURL, { 'accept-encoding': 'gzip' });
 			assert.strictEqual(unadaptedHasOwnProperty, 'undefined');
 			assert.strictEqual(unadaptedHost, undefined);
+			assert.match(unadaptedConversion ?? '', /is an invalid header name/);
 			assert.match(unadaptedError?.message ?? '', /_implicitHeader is not a function/);
 		});
 

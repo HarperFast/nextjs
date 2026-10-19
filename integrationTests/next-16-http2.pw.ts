@@ -52,6 +52,16 @@ test('static assets are served over HTTP/2', async ({ harper }) => {
 	expect(decode(response).length).toBeGreaterThan(0);
 });
 
+test('route handlers run over HTTP/2', async ({ harper }) => {
+	const response = await getHttp2(`https://${harper.hostname}:${SECURE_PORT}`, '/api/echo?q=1');
+	expect(response.status).toBe(200);
+	expect(JSON.parse(decode(response))).toEqual({
+		pathname: '/api/echo',
+		search: '?q=1',
+		host: `${harper.hostname}:${SECURE_PORT}`,
+	});
+});
+
 test('HTTP/1.1 on the same secure port is unaffected', async ({ request, harper }) => {
 	const response = await request.get(`https://${harper.hostname}:${SECURE_PORT}/`, { ignoreHTTPSErrors: true });
 	expect(response.status()).toBe(200);
