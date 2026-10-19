@@ -326,7 +326,7 @@ describe('versioned cache startup and retention', () => {
 		await assert.rejects(() => bindVersionedCache(app, 'runtime-cache'), /outside the component/);
 		await assert.rejects(() => bindVersionedCache(app, '..'), /must not contain the component/);
 		await assert.rejects(() => bindVersionedCache(app, root), /must not contain the component/);
-		await assert.rejects(() => bindVersionedCache(app, '../next-cache'), /must not contain the component directory or be inside/);
+		await assert.rejects(() => bindVersionedCache(app, '../next-cache'), /must not be inside the components directory/);
 		assert.deepEqual(await readdir(join(root, 'components')), ['app']);
 		const blockedRoot = join(root, 'file');
 		await writeFile(blockedRoot, 'not a directory');
@@ -340,6 +340,17 @@ describe('versioned cache startup and retention', () => {
 		await symlink(server, alias, 'junction');
 		await assert.rejects(bindVersionedCache(app, join(alias, 'new-cache')), /outside the component/);
 		assert.equal(existsSync(join(server, 'new-cache')), false);
+	});
+
+	it('rejects an alias into components/ for a symlinked app directory', async (t) => {
+		const { root, app } = await temporaryApp(t, 'next-16');
+		const release = join(root, 'releases', 'app-7');
+		await mkdir(dirname(release));
+		await rename(app, release);
+		await symlink(release, app, 'junction');
+		await symlink(join(root, 'components'), join(root, 'components-alias'), 'junction');
+		await assert.rejects(bindVersionedCache(app, join(root, 'components-alias', 'next-cache')), /must not be inside the components directory/);
+		assert.deepEqual(await readdir(join(root, 'components')), ['app']);
 	});
 
 	it('pins an external cache root before its alias is retargeted', async (t) => {

@@ -113,14 +113,16 @@ function contains(parent: string, child: string): boolean {
 	return !path || (!isAbsolute(path) && !path.startsWith('..' + sep) && path !== '..');
 }
 
-function assertExternalCacheRoot(appDirectory: string, cacheRoot: string): void {
+function assertExternalCacheRoot(appDirectory: string, componentsDirectory: string | undefined, cacheRoot: string): void {
 	if (contains(appDirectory, cacheRoot)) {
 		throw new Error(`Next.js cacheDirectory must be outside the component directory: ${cacheRoot}`);
 	}
-	// Harper loads every directory under `components/` as a component, so namespaces must not land there.
-	const components = dirname(appDirectory);
-	if (contains(cacheRoot, appDirectory) || (basename(components) === 'components' && contains(components, cacheRoot))) {
-		throw new Error(`Next.js cacheDirectory must not contain the component directory or be inside ${components}: ${cacheRoot}`);
+	if (contains(cacheRoot, appDirectory)) {
+		throw new Error(`Next.js cacheDirectory must not contain the component directory: ${cacheRoot}`);
+	}
+	// Harper loads directories under `components/` as components, so namespaces must not land there.
+	if (componentsDirectory && contains(componentsDirectory, cacheRoot)) {
+		throw new Error(`Next.js cacheDirectory must not be inside the components directory ${componentsDirectory}: ${cacheRoot}`);
 	}
 }
 
@@ -135,13 +137,14 @@ export async function bindVersionedCache(appDirectory: string, cacheDirectory?: 
 	const nativeRequire = createRequire(join(appDirectory, 'package.json'));
 
 	const serverDistDir = join(distDirectory, 'server');
-	if (!cacheDirectory && basename(dirname(appDirectory)) !== 'components') {
+	const componentsDirectory = basename(dirname(appDirectory)) === 'components' ? dirname(appDirectory) : undefined;
+	if (!cacheDirectory && !componentsDirectory) {
 		throw new Error(`Set cacheDirectory for a Next.js app outside <harper-root>/components/<app>: ${appDirectory}`);
 	}
-	const requestedRoot = cacheDirectory ? resolve(appDirectory, cacheDirectory) : join(dirname(dirname(appDirectory)), '.nextjs-cache');
-	assertExternalCacheRoot(appDirectory, requestedRoot);
+	const requestedRoot = cacheDirectory ? resolve(appDirectory, cacheDirectory) : join(dirname(componentsDirectory!), '.nextjs-cache');
+	assertExternalCacheRoot(appDirectory, componentsDirectory, requestedRoot);
 	const cacheRoot = await resolveCacheRoot(requestedRoot);
-	assertExternalCacheRoot(await realpath(appDirectory), cacheRoot);
+	assertExternalCacheRoot(await realpath(appDirectory), componentsDirectory && await realpath(componentsDirectory), cacheRoot);
 	const FileSystemCache = nativeRequire('next/dist/server/lib/incremental-cache/file-system-cache.js').default;
 	const seedFs = seedFileSystem(nativeRequire('next/dist/server/lib/node-fs-methods.js').nodeFs, serverDistDir);
 	const identity = await buildIdentity(appDirectory, distDirectory);
