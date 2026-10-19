@@ -72,7 +72,17 @@ function compressedHandler(adapt: boolean, onError?: (error: Error) => void): Ha
 describe('adaptHttp2ForNext', () => {
 	describe('over HTTP/2', () => {
 		let observed:
-			| { hasOwnProperty: string; pseudoHeaders: string[]; host: string; authority: string; url: string; method: string; conversion: string }
+			| {
+					hasOwnProperty: string;
+					pseudoHeaders: string[];
+					host: string;
+					authority: string;
+					url: string;
+					method: string;
+					conversion: string;
+					objectPrototype: boolean;
+					protoHeader: unknown;
+			  }
 			| undefined;
 		let unadaptedHasOwnProperty: string | undefined;
 		let unadaptedHost: string | undefined;
@@ -94,6 +104,8 @@ describe('adaptHttp2ForNext', () => {
 					url: request.url,
 					method: request.method,
 					conversion: nextHeadersConversion(request.headers),
+					objectPrototype: Object.getPrototypeOf(request.headers) === Object.prototype,
+					protoHeader: Object.getOwnPropertyDescriptor(request.headers, '__proto__')?.value,
 				};
 				response.end();
 			});
@@ -132,6 +144,12 @@ describe('adaptHttp2ForNext', () => {
 			await getHttp2(headersURL);
 			assert.ok(observed?.authority);
 			assert.strictEqual(observed?.host, observed?.authority);
+		});
+
+		it('copies a __proto__ header as a header rather than a prototype', async () => {
+			await getHttp2(headersURL, { ['__proto__']: 'x' });
+			assert.strictEqual(observed?.protoHeader, 'x');
+			assert.strictEqual(observed?.objectPrototype, true);
 		});
 
 		it('keeps a host header the client sent', async () => {
