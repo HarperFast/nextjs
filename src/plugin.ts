@@ -31,6 +31,7 @@ type Bundler = 'webpack' | 'turbopack';
 
 interface NextPluginConfig extends Config {
 	buildOnly: boolean;
+	cacheDirectory?: string;
 	bundler: Bundler;
 	dev: boolean;
 	// @ts-expect-error
@@ -79,6 +80,7 @@ function resolveConfig(scope: Scope): NextPluginConfig {
 	}
 
 	assertType('buildOnly', options.buildOnly, 'boolean');
+	assertType('cacheDirectory', options.cacheDirectory, 'string');
 	assertType('bundler', options.bundler, 'string');
 	assertType('dev', options.dev, 'boolean');
 	assertType('port', options.port, 'number');
@@ -93,6 +95,7 @@ function resolveConfig(scope: Scope): NextPluginConfig {
 	// TODO: Remove type casts when we have more proper plugin option validation from core
 	return {
 		buildOnly: (options.buildOnly as boolean) ?? false,
+		cacheDirectory: options.cacheDirectory as string,
 		// bundler default is set later in handleApplication() based on the detected Next.js version
 		bundler: options.bundler as Bundler,
 		dev: (options.dev as boolean) ?? false,
@@ -401,6 +404,12 @@ async function runNextBuild(scope: Scope, config: NextPluginConfig, next: NextPa
 
 async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) {
 	scope.logger.debug?.(`Serving Next.js application at ${scope.directory}`);
+	const cacheBindings = !config.dev
+		? createRequire(import.meta.url)('./versionedCache.cjs') as typeof import('./versionedCache.cjs')
+		: undefined;
+	cacheBindings?.markProductionCache(join(scope.directory, '.next', 'server'));
+	const cacheBinding = await cacheBindings?.bindVersionedCache(scope.directory, config.cacheDirectory);
+	if (cacheBinding) scope.logger.debug?.(`Using Next.js versioned cache at ${cacheBinding.cacheDirectory}`);
 
 	let app;
 	switch (next.version) {
@@ -416,6 +425,20 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 	}
 
 	await app.prepare();
+	if (cacheBindings) {
+		try {
+			type Renderer = { getServer(): Promise<{ nextConfig: { cacheHandler?: string; distDir?: string } }> };
+			const prepared = app as unknown as { server?: Renderer; renderServer?: Renderer };
+			const renderer = next.version === 14 ? prepared.renderServer! : prepared.server!;
+			const nextConfig = typeof renderer?.getServer === 'function' ? (await renderer.getServer()).nextConfig : undefined;
+			if (nextConfig) cacheBindings.assertVersionedCacheConfig(scope.directory, nextConfig, cacheBinding);
+			else if (cacheBinding) throw new Error(`Cannot verify versioned cache configuration for Next.js ${next.version}: unsupported server shape`);
+			if (cacheBinding) await cacheBindings.assertVersionedCacheBuild(cacheBinding);
+		} catch (error) {
+			await app.close().catch(() => {});
+			throw error;
+		}
+	}
 
 	const requestHandler = app.getRequestHandler();
 

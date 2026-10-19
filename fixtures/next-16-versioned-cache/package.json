@@ -1,0 +1,11 @@
+{
+	"name": "next-16-versioned-cache",
+	"private": true,
+	"type": "module",
+	"dependencies": {
+		"@harperfast/nextjs": "file:../../",
+		"next": "16.3.8",
+		"react": "^19",
+		"react-dom": "^19"
+	}
+}
