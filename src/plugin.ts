@@ -481,6 +481,7 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 					);
 				}
 			}
+			adaptHttp2ForNext(request._nodeRequest, request._nodeResponse);
 			// @ts-expect-error - Not sure when the IncomingMessage.url could be undefined ; need to dig into it.
 			return requestHandler(request._nodeRequest, request._nodeResponse, urlParse(request._nodeRequest.url, true));
 		},
