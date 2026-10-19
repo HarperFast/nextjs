@@ -311,9 +311,22 @@ describe('versioned cache startup and retention', () => {
 		assert.throws(() => assertVersionedCacheConfig(app, { ...config, distDir: 'other' }, binding), /configuration mismatch/);
 	});
 
-	it('rejects a cache root inside the component and reports storage failures at startup', async (t) => {
+	it('binds the .next server directory the plugin marks for production, whatever distDir the manifest names', async (t) => {
+		const { app } = await temporaryApp(t, 'next-16');
+		const file = join(app, '.next', 'required-server-files.json');
+		const { config } = JSON.parse(await readFile(file, 'utf8'));
+		await writeFile(file, JSON.stringify({ config: { ...config, distDir: 'other' } }));
+		const binding = (await bindVersionedCache(app))!;
+		assert.equal(binding.serverDistDir, join(app, '.next', 'server'));
+		assert.throws(() => assertVersionedCacheConfig(app, { cacheHandler: config.cacheHandler, distDir: 'other' }, binding), /configuration mismatch/);
+	});
+
+	it('rejects a cache root inside or containing the component, and reports storage failures at startup', async (t) => {
 		const { root, app } = await temporaryApp(t, 'next-16');
 		await assert.rejects(() => bindVersionedCache(app, 'runtime-cache'), /outside the component/);
+		await assert.rejects(() => bindVersionedCache(app, '..'), /must not contain the component/);
+		await assert.rejects(() => bindVersionedCache(app, root), /must not contain the component/);
+		assert.deepEqual(await readdir(join(root, 'components')), ['app']);
 		const blockedRoot = join(root, 'file');
 		await writeFile(blockedRoot, 'not a directory');
 		await assert.rejects(() => bindVersionedCache(app, blockedRoot), /ENOTDIR/);
@@ -346,7 +359,7 @@ describe('versioned cache startup and retention', () => {
 		await assertVersionedCacheBuild(binding);
 	});
 
-	it('prevents unowned runtime writes and seed fallback when ownership storage is inaccessible', async (t) => {
+	it('misses instead of failing or falling back to a seed, and refuses unowned writes, when ownership storage is inaccessible', async (t) => {
 		const version = 'next-16';
 		const { app } = await temporaryApp(t, version);
 		await seed(app, version, 'seed');
@@ -355,7 +368,7 @@ describe('versioned cache startup and retention', () => {
 		const cache = new Handler(context(app));
 		await assert.rejects(cache.set(pageKey(version), pageValue(version, 'runtime') as never, pageContext as never), /ENOTDIR/);
 		assert.deepEqual(await readdir(join(binding.cacheDirectory, 'server')), []);
-		await assert.rejects(cache.get(pageKey(version), pageContext), /ENOTDIR/);
+		assert.equal(await cache.get(pageKey(version), pageContext), null);
 		await assertVersionedCacheBuild(binding);
 	});
 

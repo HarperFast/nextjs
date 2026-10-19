@@ -108,22 +108,31 @@ async function resolveCacheRoot(directory: string): Promise<string> {
 	}
 }
 
+function contains(parent: string, child: string): boolean {
+	const path = relative(parent, child);
+	return !path || (!isAbsolute(path) && !path.startsWith('..' + sep) && path !== '..');
+}
+
 function assertExternalCacheRoot(appDirectory: string, cacheRoot: string): void {
-	const cacheRelative = relative(appDirectory, cacheRoot);
-	if (!cacheRelative || (!isAbsolute(cacheRelative) && !cacheRelative.startsWith('..' + sep) && cacheRelative !== '..')) {
+	if (contains(appDirectory, cacheRoot)) {
 		throw new Error(`Next.js cacheDirectory must be outside the component directory: ${cacheRoot}`);
+	}
+	// An ancestor such as `components/` would receive namespace directories Harper loads as components.
+	if (contains(cacheRoot, appDirectory)) {
+		throw new Error(`Next.js cacheDirectory must not contain the component directory: ${cacheRoot}`);
 	}
 }
 
 export async function bindVersionedCache(appDirectory: string, cacheDirectory?: string): Promise<CacheBinding | undefined> {
 	appDirectory = resolve(appDirectory);
-	const manifestFile = join(appDirectory, '.next', 'required-server-files.json');
+	// The plugin marks and serves `.next` only, so a custom distDir fails the prepared-config check instead.
+	const distDirectory = join(appDirectory, '.next');
+	const manifestFile = join(distDirectory, 'required-server-files.json');
 	if (!existsSync(manifestFile)) return;
 	const { config } = JSON.parse(readFileSync(manifestFile, 'utf8'));
 	if (!usesVersionedCache(appDirectory, config?.cacheHandler)) return;
 	const nativeRequire = createRequire(join(appDirectory, 'package.json'));
 
-	const distDirectory = resolve(appDirectory, config.distDir ?? '.next');
 	const serverDistDir = join(distDirectory, 'server');
 	if (!cacheDirectory && basename(dirname(appDirectory)) !== 'components') {
 		throw new Error(`Set cacheDirectory for a Next.js app outside <harper-root>/components/<app>: ${appDirectory}`);

@@ -27,12 +27,13 @@ export default class VersionedCacheHandler {
 		const entry = await this.runtime.get(...args);
 		if (entry !== null || !this.binding) return entry;
 		const fetch = args[1]?.kind === 'FETCH' || (args[1] as { kindHint?: string } | undefined)?.kindHint === 'fetch';
-		// Native null also means invalidation; a runtime-owned key must not resurrect an older seed.
+		// Native null also means invalidation; a runtime-owned key must not resurrect an older seed. When
+		// ownership cannot be read, a miss lets Next re-render, and its write still fails on the marker.
 		try {
 			await stat(this.runtimeEntryFile(args[0], fetch));
 			return null;
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return null;
 		}
 		// Falling back per file could combine a runtime HTML file with a different build seed's RSC.
 		this.seed ??= new this.binding.FileSystemCache({ ...this.context, fs: this.binding.seedFs });
