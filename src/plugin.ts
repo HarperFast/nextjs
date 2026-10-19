@@ -501,6 +501,7 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 					);
 				}
 			}
+			adaptHttp2ForNext(request._nodeRequest, request._nodeResponse);
 			if (missingActionBasePath !== undefined) {
 				reloadOnMissingAction(request._nodeRequest, request._nodeResponse, missingActionBasePath);
 			}
