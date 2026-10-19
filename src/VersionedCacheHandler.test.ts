@@ -326,6 +326,7 @@ describe('versioned cache startup and retention', () => {
 		await assert.rejects(() => bindVersionedCache(app, 'runtime-cache'), /outside the component/);
 		await assert.rejects(() => bindVersionedCache(app, '..'), /must not contain the component/);
 		await assert.rejects(() => bindVersionedCache(app, root), /must not contain the component/);
+		await assert.rejects(() => bindVersionedCache(app, '../next-cache'), /must not contain the component directory or be inside/);
 		assert.deepEqual(await readdir(join(root, 'components')), ['app']);
 		const blockedRoot = join(root, 'file');
 		await writeFile(blockedRoot, 'not a directory');

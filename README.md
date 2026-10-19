@@ -173,7 +173,7 @@ Build the Next.js application and then exit (including shutting down Harper). De
 
 ### `cacheDirectory: string`
 
-Root for the opt-in [versioned filesystem cache](#versioned-filesystem-cache), outside the component directory. Defaults to `<harper-root>/.nextjs-cache` for the standard `<harper-root>/components/<app>` layout. Set an absolute path for other layouts or a separate volume; relative paths resolve from the app directory and must still point outside it. A directory that contains the app, such as `components/` itself, is rejected.
+Root for the opt-in [versioned filesystem cache](#versioned-filesystem-cache), outside the component directory. Defaults to `<harper-root>/.nextjs-cache` for the standard `<harper-root>/components/<app>` layout. Set an absolute path for other layouts or a separate volume; relative paths resolve from the app directory and must still point outside it. A directory that contains the app, or one inside the `components/` directory Harper loads applications from, is rejected.
 
 ### `port: number`
 

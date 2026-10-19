@@ -27,8 +27,8 @@ export default class VersionedCacheHandler {
 		const entry = await this.runtime.get(...args);
 		if (entry !== null || !this.binding) return entry;
 		const fetch = args[1]?.kind === 'FETCH' || (args[1] as { kindHint?: string } | undefined)?.kindHint === 'fetch';
-		// Native null also means invalidation; a runtime-owned key must not resurrect an older seed. When
-		// ownership cannot be read, a miss lets Next re-render, and its write still fails on the marker.
+		// Native null also means invalidation; a runtime-owned key must not resurrect an older seed. An
+		// unreadable marker counts as owned, so the request re-renders instead of failing.
 		try {
 			await stat(this.runtimeEntryFile(args[0], fetch));
 			return null;
