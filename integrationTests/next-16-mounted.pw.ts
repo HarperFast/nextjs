@@ -2,10 +2,7 @@ import { fixture } from './fixture.ts';
 
 const { test, expect } = fixture('next-16-mounted');
 
-// Un-skip once harper's `Request.withNodeAdapter()` can serve Next.js — today an adapted request 500s
-// on `headers.hasOwnProperty` and a missing `appendHeader`/`_implicitHeader`, and any response over
-// the adapter's 16 KB buffer stalls. See HarperFast/nextjs#61.
-test.describe.fixme('served under a urlPath mount', () => {
+test.describe('served under a urlPath mount', () => {
 	test('mount root reaches the Next.js home page', async ({ request, harper }) => {
 		const response = await request.get(`${harper.httpURL}/mounted`);
 		expect(response.status()).toBe(200);

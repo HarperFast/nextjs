@@ -15,3 +15,9 @@ The cache root resolves existing ancestors through `realpath` before directory c
 Namespaces and ownership markers are retained for operator-managed cleanup after their workers stop. No automatic cache sweep is added: a pre-delete liveness check cannot exclude a concurrent activation, and removing ownership markers while a worker serves can revive older seeds after invalidation.
 
 `VersionedCacheHandler.test.ts` exercises installed Next14/15/16 caches against real files and fresh processes. `integrationTests/next-16-versioned-cache.pw.ts` holds a real regeneration across the swap and verifies the new build and persistence after restarts.
+
+# Request hand-off to Next.js
+
+`requestHandoff.ts` gives Next.js the Node request directly unless Harper's router changed the URL. Harper strips an application's `urlPath` mount by proxying its `Request`; the Node request underneath keeps the URL as it arrived. Equal URLs mean no mount, so unmounted apps never allocate an adapter. When the URLs differ, the arriving URL still goes straight to Next.js if it begins with the build's `basePath` (read once from `routes-manifest.json`), because Next.js strips its own basePath and would 404 the stripped URL. Only the remaining requests go through `Request.withNodeAdapter()`.
+
+Every 5.x Harper has `withNodeAdapter`, so its presence proves nothing: the adapter only serves Next.js from Harper 5.3.0, and from 5.3.3 on runtimes whose pipe fast path skips `write()` overrides (Node.js 26.11+). The plugin reads the running version once per worker from the documented `registration_info` operation; an unreadable version counts as too old. Below the floor a mounted request keeps the direct hand-off and the plugin warns once, without the URL, which can carry query-string secrets.
