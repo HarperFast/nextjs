@@ -51,7 +51,7 @@ function versionAtLeast(version: string, ...floor: [number, number, number]): bo
 	return match[4] === undefined;
 }
 
-/** Mirrors Next.js's own basePath match: the prefix must end at a path segment boundary. */
+/** Mirrors Next.js's own basePath match. */
 function carriesBasePath(url: string, basePath: string): boolean {
 	if (basePath === '' || !url.startsWith(basePath)) return false;
 	const boundary = url[basePath.length];
