@@ -11,13 +11,12 @@ import * as harper from 'harper';
 import type { Scope, Config, FilesOption } from 'harper';
 
 import { createRequire } from 'node:module';
-import { parse as urlParse } from 'node:url';
 import { join } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 
 import { withBuildLock, type BuildInfoTable } from './buildLock.js';
-import { adaptHttp2ForNext } from './http2Compat.js';
 import { reloadOnMissingAction } from './actionReload.js';
+import { createNextHttpHandler, readBasePath as readBuildBasePath, type NextRequestHandler } from './requestHandoff.js';
 import { OLD_BUILD_SWEEP_DELAY_MS, oldBuildSweepEnabled, sweepOtherBuilds } from './buildSweep.js';
 
 import type NextModule14 from 'next-14';
@@ -458,58 +457,23 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 		}
 	}
 
-	const requestHandler = app.getRequestHandler();
+	const requestHandler = app.getRequestHandler() as NextRequestHandler;
 	const missingActionBasePath =
 		config.reloadOnMissingAction && !config.dev && next.version === 16 ? readBasePath(scope) : undefined;
-
-	let warnedMissingNodeAdapter = false;
+	const nextHandler: NextRequestHandler =
+		missingActionBasePath !== undefined
+			? (request, response, parsedUrl) => {
+					reloadOnMissingAction(request, response, missingActionBasePath);
+					return requestHandler(request, response, parsedUrl);
+				}
+			: requestHandler;
 
 	scope.server?.http?.(
-		(request, next) => {
-			// `== null`, not `=== undefined`: Harper's Bun and uWS requests carry a null `_nodeResponse`,
-			// and neither implements the Node adapter used below.
-			if (request._nodeResponse == null) return next(request);
-			// Harper's router strips an application's urlPath mount by proxying the Harper `Request`, so the
-			// Node request underneath it still carries the un-stripped URL. Only a request middleware
-			// rewrote needs the adapter, which presents the Request's method/url/headers over that Node
-			// request; everything else keeps the cheaper direct hand-off.
-			if (request.url !== request._nodeRequest.url) {
-				if (typeof request.withNodeAdapter === 'function') {
-					return request
-						.withNodeAdapter((nodeRequest, nodeResponse) => {
-							if (missingActionBasePath !== undefined) {
-								reloadOnMissingAction(nodeRequest, nodeResponse, missingActionBasePath);
-							}
-							// @ts-expect-error - Not sure when the IncomingMessage.url could be undefined ; need to dig into it.
-							return requestHandler(nodeRequest, nodeResponse, urlParse(nodeRequest.url, true));
-						})
-						.then((response) => {
-							// Required by withNodeAdapter: a connection reset after the headers are sent destroys
-							// this stream with an error, which Node throws as an uncaught exception without a
-							// listener. Harper's own pipe already warns about the error, so this only has to
-							// exist, not report.
-							response.body.on('error', (error) =>
-								scope.logger.debug?.(`Next.js response stream error for ${request.pathname}: `, error)
-							);
-							return response;
-						});
-				}
-				if (!warnedMissingNodeAdapter) {
-					warnedMissingNodeAdapter = true;
-					scope.logger.warn?.(
-						'This version of Harper does not provide Request.withNodeAdapter, so Next.js receives the URL as it ' +
-							`arrived rather than the ${request.pathname} Harper resolved it to. An application mounted at a ` +
-							'urlPath will not route correctly; upgrade Harper or serve the application at the root.'
-					);
-				}
-			}
-			adaptHttp2ForNext(request._nodeRequest, request._nodeResponse);
-			if (missingActionBasePath !== undefined) {
-				reloadOnMissingAction(request._nodeRequest, request._nodeResponse, missingActionBasePath);
-			}
-			// @ts-expect-error - Not sure when the IncomingMessage.url could be undefined ; need to dig into it.
-			return requestHandler(request._nodeRequest, request._nodeResponse, urlParse(request._nodeRequest.url, true));
-		},
+		createNextHttpHandler(nextHandler, {
+			basePath: readBuildBasePath(scope.directory, config.dev),
+			harperVersion: await runningHarperVersion(scope),
+			logger: scope.logger,
+		}),
 		{ runFirst: config.runFirst, port: config.port, securePort: config.securePort }
 	);
 
@@ -530,6 +494,16 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 			// Okay to set `runFirst: true` here since this has a strict match on `/_next/webpack-hmr`
 			{ runFirst: true, port: config.port, securePort: config.securePort }
 		);
+	}
+}
+
+async function runningHarperVersion(scope: Scope): Promise<string | undefined> {
+	try {
+		// The documented operation that reports the running version; it needs no permission.
+		return (await scope.server?.operation({ operation: 'registration_info' }, undefined, false))?.version;
+	} catch (error) {
+		scope.logger.debug?.('Could not read the running Harper version: ', error);
+		return undefined;
 	}
 }
 
