@@ -15,7 +15,7 @@ import { parse as urlParse } from 'node:url';
 import { join } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 
-import { withBuildLock } from './buildLock.js';
+import { withBuildLock, type BuildInfoTable } from './buildLock.js';
 import { adaptHttp2ForNext } from './http2Compat.js';
 import { OLD_BUILD_SWEEP_DELAY_MS, oldBuildSweepEnabled, sweepOtherBuilds } from './buildSweep.js';
 
@@ -312,6 +312,8 @@ async function build(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 	await withBuildLock(scope, {
 		getBuildId: () => getBuildId(scope),
 		runBuild: () => runNextBuild(scope, config, next),
+		table: (harper.databases as unknown as Record<string, Record<string, BuildInfoTable> | undefined>)
+			.harperfast_nextjs?.nextjs_build_info,
 	});
 }
 

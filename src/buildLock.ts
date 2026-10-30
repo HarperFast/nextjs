@@ -1,4 +1,4 @@
-import { databases, type Scope } from 'harper';
+import type { Scope } from 'harper';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 // Coordinates production builds across Harper worker threads (and processes sharing a database). Harper
@@ -10,9 +10,6 @@ import { setTimeout as sleep } from 'node:timers/promises';
 // rather than building in parallel. This mirrors the `@harperfast/vite` `buildLock` pattern, plus a
 // heartbeat: the builder re-stamps its claim on an interval so an in-progress build of any length stays
 // fresh, while a crashed builder's claim still goes stale (and is reclaimed) within STALE_CLAIM_MS.
-
-const DATABASE = 'harperfast_nextjs';
-const TABLE = 'nextjs_build_info';
 
 // A completed build (`success`/`failure`) is reused for this long; after it, a restart triggers a rebuild.
 const FRESH_BUILD_MS = 5000;
@@ -36,14 +33,9 @@ interface BuildInfoRecord {
 }
 
 /** The subset of the Harper build-info table the lock uses. */
-interface BuildInfoTable {
+export interface BuildInfoTable {
 	get(key: string): Promise<BuildInfoRecord | undefined>;
 	put(key: string, value: { buildId: string | null; status: string }): Promise<unknown> | unknown;
-}
-
-/** The build-info table, or `undefined` when running outside Harper (e.g. unit tests). */
-function buildInfoTable(): BuildInfoTable | undefined {
-	return (databases as unknown as Record<string, Record<string, BuildInfoTable>>)?.[DATABASE]?.[TABLE];
 }
 
 /**
@@ -90,6 +82,8 @@ export interface BuildLockDeps {
 	getBuildId: () => string | null;
 	/** Runs `next build` and resolves with the resulting BUILD_ID. Rejects if the build fails. */
 	runBuild: () => Promise<string>;
+	/** The `harperfast_nextjs.nextjs_build_info` table, absent outside Harper. */
+	table?: BuildInfoTable;
 }
 
 /**
@@ -100,7 +94,7 @@ export interface BuildLockDeps {
  * Outside Harper (no coordination table), it simply runs the build.
  */
 export async function withBuildLock(scope: Scope, deps: BuildLockDeps): Promise<void> {
-	const table = buildInfoTable();
+	const { table } = deps;
 	if (!table) {
 		await deps.runBuild();
 		return;
