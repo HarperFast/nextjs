@@ -194,6 +194,20 @@ The `files` option is now optional with plugins. This make configuration simpler
 Glob pattern specifying which files Harper should watch for changes. Example: `'/app/*'`.
 -->
 
+## Serving under a `urlPath`
+
+Harper's `urlPath` option mounts the application at a path prefix:
+
+```yaml
+'@harperfast/nextjs':
+  package: '@harperfast/nextjs'
+  urlPath: /shop
+```
+
+Set the Next.js [`basePath`](https://nextjs.org/docs/app/api-reference/config/next-config-js/basePath) to the same value. Next.js then generates its links and `/_next/*` asset URLs under the prefix, and the plugin passes requests straight through for Next.js to strip its own `basePath`.
+
+Without a matching `basePath`, pages and route handlers still route, because the plugin hands Next.js the path relative to the mount through Harper's `Request.withNodeAdapter()`. That needs Harper 5.3.0 or later (5.3.3 or later on Node.js 26.11+); on an older Harper the plugin logs a warning and the mounted application does not route. Next.js still emits its asset URLs at the root, outside the mount, so client-side assets do not load.
+
 ## Versioned filesystem cache
 
 To keep Next.js's incremental render and data caches on disk while isolating deployments, use `versionedCacheHandlerPath()` in `next.config.mjs` or `next.config.ts`:

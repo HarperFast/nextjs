@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 
 import { withBuildLock, type BuildInfoTable } from './buildLock.js';
-import { createNextHttpHandler, readBasePath, type NextRequestHandler } from './requestHandoff.js';
+import { createNextHttpHandler, type NextRequestHandler } from './requestHandoff.js';
 import { OLD_BUILD_SWEEP_DELAY_MS, oldBuildSweepEnabled, sweepOtherBuilds } from './buildSweep.js';
 
 import type NextModule14 from 'next-14';
@@ -427,24 +427,25 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 	}
 
 	await app.prepare();
-	if (cacheBindings) {
-		try {
-			type Renderer = { getServer(): Promise<{ nextConfig: { cacheHandler?: string; distDir?: string } }> };
-			const prepared = app as unknown as { server?: Renderer; renderServer?: Renderer };
-			const renderer = next.version === 14 ? prepared.renderServer! : prepared.server!;
-			const nextConfig = typeof renderer?.getServer === 'function' ? (await renderer.getServer()).nextConfig : undefined;
+	let nextConfig: { basePath?: string; cacheHandler?: string; distDir?: string } | undefined;
+	try {
+		type Renderer = { getServer(): Promise<{ nextConfig: NonNullable<typeof nextConfig> }> };
+		const prepared = app as unknown as { server?: Renderer; renderServer?: Renderer };
+		const renderer = next.version === 14 ? prepared.renderServer! : prepared.server!;
+		nextConfig = typeof renderer?.getServer === 'function' ? (await renderer.getServer()).nextConfig : undefined;
+		if (cacheBindings) {
 			if (nextConfig) cacheBindings.assertVersionedCacheConfig(scope.directory, nextConfig, cacheBinding);
 			else if (cacheBinding) throw new Error(`Cannot verify versioned cache configuration for Next.js ${next.version}: unsupported server shape`);
 			if (cacheBinding) await cacheBindings.assertVersionedCacheBuild(cacheBinding);
-		} catch (error) {
-			await app.close().catch(() => {});
-			throw error;
 		}
+	} catch (error) {
+		await app.close().catch(() => {});
+		throw error;
 	}
 
 	scope.server?.http?.(
 		createNextHttpHandler(app.getRequestHandler() as NextRequestHandler, {
-			basePath: readBasePath(scope.directory, config.dev),
+			basePath: nextConfig?.basePath ?? '',
 			harperVersion: await runningHarperVersion(scope),
 			logger: scope.logger,
 		}),
