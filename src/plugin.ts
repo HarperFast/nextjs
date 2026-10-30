@@ -474,7 +474,7 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 
 async function runningHarperVersion(scope: Scope): Promise<string | undefined> {
 	try {
-		// The documented operation that reports the running version; it needs no permission.
+		// `registration_info` needs no permission.
 		return (await scope.server?.operation({ operation: 'registration_info' }, undefined, false))?.version;
 	} catch (error) {
 		scope.logger.debug?.('Could not read the running Harper version: ', error);

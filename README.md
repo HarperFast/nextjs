@@ -206,7 +206,7 @@ Harper's `urlPath` option mounts the application at a path prefix:
 
 Set the Next.js [`basePath`](https://nextjs.org/docs/app/api-reference/config/next-config-js/basePath) to the same value. Next.js then generates its links and `/_next/*` asset URLs under the prefix, and the plugin passes requests straight through for Next.js to strip its own `basePath`.
 
-Without a matching `basePath`, pages and route handlers still route, because the plugin hands Next.js the path relative to the mount through Harper's `Request.withNodeAdapter()`. That needs Harper 5.3.0 or later (5.3.3 or later on Node.js 26.11+); on an older Harper the plugin logs a warning and the mounted application does not route. Next.js still emits its asset URLs at the root, outside the mount, so client-side assets do not load.
+Without a matching `basePath`, a request under the mount still reaches the right page or route handler, because the plugin hands Next.js the path relative to the mount through Harper's `Request.withNodeAdapter()`. That needs Harper 5.3.0 or later (5.3.3 or later on Node.js 26.11+); on an older Harper the plugin logs a warning and the mounted application does not route. Everything Next.js generates is still relative to the root, outside the mount: asset URLs, links, and redirects (including its trailing-slash redirect). Client-side assets do not load and navigation leaves the mount, so `basePath` is the supported setup.
 
 ## Versioned filesystem cache
 
