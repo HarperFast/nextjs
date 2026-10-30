@@ -28,8 +28,6 @@ test.describe('served under a urlPath mount', () => {
 		expect(await response.json()).toEqual({ pathname: '/api/echo', search: '?q=1' });
 	});
 
-	// Asserts on the server-rendered markup only: Next.js still emits its `/_next/*` asset URLs at the
-	// root, outside the mount, until the app is built with a matching `basePath`.
 	test('an HTTP/2 request reaches Next.js with its mount-relative path', async ({ harper }) => {
 		const response = await getHttp2(`https://${harper.hostname}:${SECURE_PORT}`, '/mounted/api/echo?q=1');
 		expect(response.status).toBe(200);
