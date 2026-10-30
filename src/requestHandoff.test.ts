@@ -1,12 +1,9 @@
-import { describe, it, before, after } from 'node:test';
+import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { UrlWithParsedQuery } from 'node:url';
 
-import { createNextHttpHandler, nodeAdapterUsable, readBasePath, type HarperHttpRequest } from './requestHandoff.js';
+import { createNextHttpHandler, nodeAdapterUsable, type HarperHttpRequest } from './requestHandoff.js';
 
 describe('nodeAdapterUsable', () => {
 	it('requires Harper 5.3.0', () => {
@@ -26,29 +23,6 @@ describe('nodeAdapterUsable', () => {
 	it('rejects an unknown or unparseable version', () => {
 		assert.strictEqual(nodeAdapterUsable(undefined, false), false);
 		assert.strictEqual(nodeAdapterUsable('latest', false), false);
-	});
-});
-
-describe('readBasePath', () => {
-	let directory: string;
-	before(() => {
-		directory = mkdtempSync(join(tmpdir(), 'nextjs-basepath-'));
-	});
-	after(() => rmSync(directory, { recursive: true, force: true }));
-
-	it('is empty without a routes manifest', () => {
-		assert.strictEqual(readBasePath(directory, false), '');
-		assert.strictEqual(readBasePath(directory, true), '');
-	});
-
-	it('reads the production manifest, and prefers the Next.js 16 dev manifest in dev', () => {
-		mkdirSync(join(directory, '.next', 'dev'), { recursive: true });
-		writeFileSync(join(directory, '.next', 'routes-manifest.json'), JSON.stringify({ basePath: '/built' }));
-		assert.strictEqual(readBasePath(directory, false), '/built');
-		assert.strictEqual(readBasePath(directory, true), '/built');
-		writeFileSync(join(directory, '.next', 'dev', 'routes-manifest.json'), JSON.stringify({ basePath: '/dev' }));
-		assert.strictEqual(readBasePath(directory, true), '/dev');
-		assert.strictEqual(readBasePath(directory, false), '/built');
 	});
 });
 

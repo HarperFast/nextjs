@@ -6,7 +6,7 @@ import { connect, constants, createServer as createHttp2Server, type Http2Server
 import type { AddressInfo } from 'node:net';
 import { gunzipSync } from 'node:zlib';
 
-import { adaptHttp2ForNext } from './http2Compat.js';
+import { adaptHttp2ForNext, stripHttp2PseudoHeaders } from './http2Compat.js';
 
 const require = createRequire(import.meta.url);
 const compression = require('next-16/dist/compiled/compression');
@@ -232,5 +232,26 @@ describe('adaptHttp2ForNext', () => {
 		} finally {
 			server.close();
 		}
+	});
+});
+
+describe('stripHttp2PseudoHeaders', () => {
+	it('drops pseudo-headers and takes host from :authority, so Next.js can convert them', () => {
+		const headers: Record<string, string> = {
+			':method': 'GET',
+			':path': '/api/echo?q=1',
+			':authority': 'example.test:9927',
+			':scheme': 'https',
+			accept: '*/*',
+		};
+		stripHttp2PseudoHeaders(headers);
+		assert.deepStrictEqual(headers, { accept: '*/*', host: 'example.test:9927' });
+		assert.strictEqual(nextHeadersConversion(headers), 'ok');
+	});
+
+	it('keeps an explicit host', () => {
+		const headers: Record<string, string> = { ':authority': 'a.test', host: 'b.test' };
+		stripHttp2PseudoHeaders(headers);
+		assert.deepStrictEqual(headers, { host: 'b.test' });
 	});
 });

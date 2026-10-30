@@ -2,8 +2,6 @@ import { fixture } from './fixture.ts';
 
 const { test, expect } = fixture('next-16-mounted-basepath');
 
-// The Next.js basePath equals the Harper urlPath, so the URL as it arrived already carries the basePath and
-// Next.js strips it itself; handing Next.js Harper's mount-stripped URL instead would 404.
 test.describe('basePath equal to the urlPath mount', () => {
 	test('mount root reaches the Next.js home page', async ({ request, harper }) => {
 		const response = await request.get(`${harper.httpURL}/mounted`);

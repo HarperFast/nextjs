@@ -1,11 +1,9 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { Http2ServerRequest, Http2ServerResponse } from 'node:http2';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { Http2ServerRequest, type Http2ServerResponse } from 'node:http2';
 import { Writable } from 'node:stream';
 import { parse as urlParse, type UrlWithParsedQuery } from 'node:url';
 
-import { adaptHttp2ForNext } from './http2Compat.js';
+import { adaptHttp2ForNext, stripHttp2PseudoHeaders } from './http2Compat.js';
 
 export type NextRequestHandler = (
 	request: IncomingMessage,
@@ -13,7 +11,6 @@ export type NextRequestHandler = (
 	parsedUrl: UrlWithParsedQuery
 ) => Promise<void>;
 
-/** The parts of Harper's `Request` the hand-off reads. */
 export interface HarperHttpRequest {
 	url: string;
 	_nodeRequest: IncomingMessage | Http2ServerRequest;
@@ -54,23 +51,6 @@ function versionAtLeast(version: string, ...floor: [number, number, number]): bo
 	return match[4] === undefined;
 }
 
-/**
- * The `basePath` the Next.js app was built with, or `''`. Next.js 16 writes its dev-server manifest under
- * `.next/dev`; Next.js 14's dev server writes none, so a dev-mode Next.js 14 app reads as having no basePath.
- */
-export function readBasePath(directory: string, dev: boolean): string {
-	const manifests = [join(directory, '.next', 'routes-manifest.json')];
-	if (dev) manifests.unshift(join(directory, '.next', 'dev', 'routes-manifest.json'));
-	for (const manifest of manifests) {
-		try {
-			return JSON.parse(readFileSync(manifest, 'utf8')).basePath ?? '';
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-		}
-	}
-	return '';
-}
-
 /** Mirrors Next.js's own basePath match: the prefix must end at a path segment boundary. */
 function carriesBasePath(url: string, basePath: string): boolean {
 	if (basePath === '' || !url.startsWith(basePath)) return false;
@@ -92,15 +72,14 @@ export function createNextHttpHandler(
 		const nodeRequest = request._nodeRequest as IncomingMessage;
 		const nodeResponse = request._nodeResponse as ServerResponse;
 		const nodeUrl = nodeRequest.url!;
-		// Harper's router strips an application's urlPath mount by proxying the Harper `Request`, so the Node
-		// request underneath still carries the un-stripped URL. The adapter presents the stripped one to Next.js,
-		// unless that URL still begins with the app's basePath: Next.js strips its own basePath, and would 404 a
-		// stripped URL that no longer carries it.
+		// Harper strips a urlPath mount by proxying its `Request`; the Node request keeps the URL as it arrived.
 		if (request.url !== nodeUrl && !carriesBasePath(nodeUrl, basePath)) {
 			if (adapterUsable) {
-				return request.withNodeAdapter((adaptedRequest, adaptedResponse) =>
-					requestHandler(adaptedRequest, adaptedResponse, urlParse(adaptedRequest.url!, true))
-				);
+				const http2 = request._nodeRequest instanceof Http2ServerRequest;
+				return request.withNodeAdapter((adaptedRequest, adaptedResponse) => {
+					if (http2) stripHttp2PseudoHeaders(adaptedRequest.headers);
+					return requestHandler(adaptedRequest, adaptedResponse, urlParse(adaptedRequest.url!, true));
+				});
 			}
 			if (!warnedAdapterUnusable) {
 				warnedAdapterUnusable = true;

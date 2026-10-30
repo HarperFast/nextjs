@@ -37,3 +37,14 @@ export function adaptHttp2ForNext(
 function implicitHeader(this: Http2ServerResponse): void {
 	if (!this.headersSent) this.writeHead(this.statusCode);
 }
+
+/**
+ * The same header shape fix, in place, for the headers `Request.withNodeAdapter()` presents: Harper builds them
+ * from its own `Request`, which keeps HTTP/2's pseudo-headers and has no `host`.
+ */
+export function stripHttp2PseudoHeaders(headers: IncomingHttpHeaders): void {
+	headers.host ??= headers[':authority'] as string | undefined;
+	for (const name in headers) {
+		if (name[0] === ':') delete headers[name];
+	}
+}
