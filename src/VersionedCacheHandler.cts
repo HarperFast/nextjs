@@ -4,6 +4,13 @@ import { dirname, join } from 'node:path';
 import { getCacheBinding, isProductionCache, stockCacheConstructor, type FileSystemCacheContext } from './versionedCache.cjs';
 import type FileSystemCache from 'next/dist/server/lib/incremental-cache/file-system-cache.js';
 
+const noCache = {
+	get: async () => null,
+	set: async () => {},
+	revalidateTag: async () => {},
+	resetRequestCache: () => {},
+} as unknown as FileSystemCache;
+
 export default class VersionedCacheHandler {
 	private runtime: FileSystemCache;
 	private seed?: FileSystemCache;
@@ -12,6 +19,12 @@ export default class VersionedCacheHandler {
 
 	constructor(context: FileSystemCacheContext) {
 		this.context = context;
+		// Next's Node.js middleware adapter constructs the handler without serverDistDir, where its own
+		// default is no cache at all; match that.
+		if (!context.serverDistDir) {
+			this.runtime = noCache;
+			return;
+		}
 		this.binding = context.dev ? undefined : getCacheBinding(context.serverDistDir);
 		if (!this.binding && !context.dev && isProductionCache(context.serverDistDir)) {
 			throw new Error('VersionedCacheHandler has no production build binding; check .next/required-server-files.json and restart the application');
