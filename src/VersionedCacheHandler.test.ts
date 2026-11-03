@@ -270,6 +270,29 @@ describe('versioned cache startup and retention', () => {
 		assert.ok(existsSync(join(app, '.next', 'server', 'app', 'dev-page.html')));
 		assert.equal(existsSync(join(binding.cacheDirectory, 'server', 'app', 'dev-page.html')), false);
 	});
+
+	for (const version of versions) it(`is a no-op cache in Node.js middleware, which Next constructs without serverDistDir (${version})`, async (t) => {
+		const { app } = await temporaryApp(t, version);
+		markProductionCache(context(app).serverDistDir);
+		await bindVersionedCache(app);
+		const { IncrementalCache } = require(`${version}/dist/server/lib/incremental-cache/index.js`);
+		for (const dev of [false, true]) {
+			// The arguments Next's middleware adapter passes when the server's cache is not shared with it.
+			const { cacheHandler } = new IncrementalCache({
+				CurCacheHandler: Handler,
+				minimalMode: !dev,
+				dev,
+				requestHeaders: {},
+				getPrerenderManifest: () => ({ version: -1, routes: {}, dynamicRoutes: {}, notFoundRoutes: [], preview: { previewModeId: 'test' } }),
+			});
+			assert.ok(cacheHandler instanceof Handler);
+			await cacheHandler.set(pageKey(version), pageValue(version, 'middleware') as never, pageContext as never);
+			assert.equal(await cacheHandler.get(pageKey(version), pageContext), null);
+			await cacheHandler.revalidateTag('tag');
+			cacheHandler.resetRequestCache();
+		}
+	});
+
 	it('leaves default and unrelated custom handlers untouched', async (t) => {
 		const { app } = await temporaryApp(t, 'next-16');
 		const file = join(app, '.next', 'required-server-files.json');
