@@ -71,7 +71,10 @@ for (const [mode, applications] of loaderModes) test(`an old regeneration cannot
 			cwd: candidate, env: { ...process.env, ...options.env }, timeout: 120_000, maxBuffer: 10 * 1024 * 1024,
 		});
 
-		const initial = await (await request.get(httpURL)).text();
+		const initialResponse = await request.get(httpURL);
+		// Every request goes through the fixture's Node.js proxy, which constructs its own cache handler.
+		expect(initialResponse.headers()['x-harper-proxy']).toBe('1');
+		const initial = await initialResponse.text();
 		expect(initial).toContain('<h1 data-release="true">v1</h1>');
 		await writeFile(join(gate, 'hold'), '');
 		expect((await request.post(`${httpURL}/api/revalidate`)).status()).toBe(200);
@@ -107,6 +110,7 @@ for (const [mode, applications] of loaderModes) test(`an old regeneration cannot
 		const afterRestart = await request.get(httpURL);
 		expect(nonce(await afterRestart.text())).toBe(regenerated);
 		expect(afterRestart.headers()['x-nextjs-cache']).toBe('HIT');
+		expect(afterRestart.headers()['x-harper-proxy']).toBe('1');
 	} finally {
 		await writeFile(join(gate, 'release'), '').catch(() => {});
 		if (started) await teardownHarper(started);
