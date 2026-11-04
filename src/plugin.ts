@@ -11,12 +11,11 @@ import * as harper from 'harper';
 import type { Scope, Config, FilesOption } from 'harper';
 
 import { createRequire } from 'node:module';
-import { parse as urlParse } from 'node:url';
 import { join } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 
-import { withBuildLock } from './buildLock.js';
-import { adaptHttp2ForNext } from './http2Compat.js';
+import { withBuildLock, type BuildInfoTable } from './buildLock.js';
+import { createNextHttpHandler, type NextRequestHandler } from './requestHandoff.js';
 import { OLD_BUILD_SWEEP_DELAY_MS, oldBuildSweepEnabled, sweepOtherBuilds } from './buildSweep.js';
 
 import type NextModule14 from 'next-14';
@@ -312,6 +311,8 @@ async function build(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 	await withBuildLock(scope, {
 		getBuildId: () => getBuildId(scope),
 		runBuild: () => runNextBuild(scope, config, next),
+		table: (harper.databases as unknown as Record<string, Record<string, BuildInfoTable> | undefined>)
+			.harperfast_nextjs?.nextjs_build_info,
 	});
 }
 
@@ -426,30 +427,28 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 	}
 
 	await app.prepare();
-	if (cacheBindings) {
-		try {
-			type Renderer = { getServer(): Promise<{ nextConfig: { cacheHandler?: string; distDir?: string } }> };
-			const prepared = app as unknown as { server?: Renderer; renderServer?: Renderer };
-			const renderer = next.version === 14 ? prepared.renderServer! : prepared.server!;
-			const nextConfig = typeof renderer?.getServer === 'function' ? (await renderer.getServer()).nextConfig : undefined;
+	let nextConfig: { basePath?: string; cacheHandler?: string; distDir?: string } | undefined;
+	try {
+		type Renderer = { getServer(): Promise<{ nextConfig: NonNullable<typeof nextConfig> }> };
+		const prepared = app as unknown as { server?: Renderer; renderServer?: Renderer };
+		const renderer = next.version === 14 ? prepared.renderServer! : prepared.server!;
+		nextConfig = typeof renderer?.getServer === 'function' ? (await renderer.getServer()).nextConfig : undefined;
+		if (cacheBindings) {
 			if (nextConfig) cacheBindings.assertVersionedCacheConfig(scope.directory, nextConfig, cacheBinding);
 			else if (cacheBinding) throw new Error(`Cannot verify versioned cache configuration for Next.js ${next.version}: unsupported server shape`);
 			if (cacheBinding) await cacheBindings.assertVersionedCacheBuild(cacheBinding);
-		} catch (error) {
-			await app.close().catch(() => {});
-			throw error;
 		}
+	} catch (error) {
+		await app.close().catch(() => {});
+		throw error;
 	}
 
-	const requestHandler = app.getRequestHandler();
-
 	scope.server?.http?.(
-		(request, next) => {
-			if (request._nodeResponse === undefined) return next(request);
-			adaptHttp2ForNext(request._nodeRequest, request._nodeResponse);
-			// @ts-expect-error - Not sure when the IncomingMessage.url could be undefined ; need to dig into it.
-			return requestHandler(request._nodeRequest, request._nodeResponse, urlParse(request._nodeRequest.url, true));
-		},
+		createNextHttpHandler(app.getRequestHandler() as NextRequestHandler, {
+			basePath: nextConfig?.basePath ?? '',
+			harperVersion: await runningHarperVersion(scope),
+			logger: scope.logger,
+		}),
 		{ runFirst: config.runFirst, port: config.port, securePort: config.securePort }
 	);
 
@@ -470,6 +469,16 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 			// Okay to set `runFirst: true` here since this has a strict match on `/_next/webpack-hmr`
 			{ runFirst: true, port: config.port, securePort: config.securePort }
 		);
+	}
+}
+
+async function runningHarperVersion(scope: Scope): Promise<string | undefined> {
+	try {
+		// `registration_info` needs no permission.
+		return (await scope.server?.operation({ operation: 'registration_info' }, undefined, false))?.version;
+	} catch (error) {
+		scope.logger.debug?.('Could not read the running Harper version: ', error);
+		return undefined;
 	}
 }
 
