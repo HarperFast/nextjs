@@ -76,12 +76,11 @@ async function reportStartupFailure<T>(fixtureName: string, start: () => Promise
 
 export interface FixtureInstance {
 	readonly harper: HarperContext;
-	/** Stop the Harper process and start it again on the same data directory and address. */
-	restart(): Promise<void>;
+	/** Keeps the data directory and address; `whileStopped` runs after the process exits. */
+	restart(whileStopped?: () => void | Promise<void>): Promise<void>;
 	stop(): Promise<void>;
 }
 
-/** Start a Harper instance for a fixture outside the worker-scoped `harper` fixture, e.g. a second node. */
 export async function startFixture(fixtureName: string, options?: FixtureOptions): Promise<FixtureInstance> {
 	const fixturePath = join(import.meta.dirname, '..', 'fixtures', fixtureName);
 	const startHarperOptions = startOptions(options);
@@ -92,8 +91,9 @@ export async function startFixture(fixtureName: string, options?: FixtureOptions
 		get harper() {
 			return started.harper;
 		},
-		async restart() {
+		async restart(whileStopped) {
 			await killHarper(started);
+			await whileStopped?.();
 			started = await reportStartupFailure(fixtureName, () => startHarper(started, startHarperOptions));
 		},
 		stop: () => teardownHarper(started),

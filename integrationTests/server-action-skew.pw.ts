@@ -1,10 +1,10 @@
 import { readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { test, expect, type Page } from '@playwright/test';
-import { startFixture } from './fixture.ts';
+import { startFixture, type FixtureInstance } from './fixture.ts';
 
-// These tests pin down the current, broken behavior so a fix has to flip them. A fixed
-// NEXT_SERVER_ACTIONS_ENCRYPTION_KEY, or a build that keeps `.next/cache/.rscinfo`, keeps the IDs stable.
+// These tests assert the current, broken behavior. A fixed NEXT_SERVER_ACTIONS_ENCRYPTION_KEY, or a build
+// that keeps `.next/cache/.rscinfo`, keeps the action IDs stable.
 const FIXTURE = 'next-16-server-actions';
 const ACTION_NOT_FOUND = 'was not found on the server';
 
@@ -56,8 +56,7 @@ test('a rebuild of unchanged source breaks server actions in pages that are alre
 		await expect(page.getByTestId('result')).toHaveText('pong');
 
 		// What a deploy hands the plugin: the same source in a fresh tree, with no `.next` from the last build.
-		rmSync(join(componentDir(node.harper.dataRootDir), '.next'), { recursive: true, force: true });
-		await node.restart();
+		await node.restart(() => rmSync(join(componentDir(node.harper.dataRootDir), '.next'), { recursive: true, force: true }));
 		const after = buildId(node.harper.dataRootDir);
 
 		const replayed = await replay(node.harper.httpURL, original);
@@ -80,15 +79,22 @@ test('a rebuild of unchanged source breaks server actions in pages that are alre
 });
 
 test('two nodes built from the same source disagree on server action IDs', async ({ page }) => {
-	const [nodeA, nodeB] = await Promise.all([startFixture(FIXTURE), startFixture(FIXTURE)]);
+	const nodes: FixtureInstance[] = [];
 	try {
+		nodes.push(await startFixture(FIXTURE));
+		nodes.push(await startFixture(FIXTURE));
+		const [nodeA, nodeB] = nodes;
 		const a = nodeA.harper.httpURL;
 		const b = nodeB.harper.httpURL;
-		// A load balancer that sends the page request to one node and the action POST to the other.
+		// A load balancer sending the action POST to the node that did not serve the page. It forwards the
+		// public host, or Next.js rejects the POST as cross-origin before looking up the action.
 		await page.route(`${a}/**`, async (route) => {
 			const request = route.request();
 			if (request.method() !== 'POST' || !request.headers()['next-action']) return route.continue();
-			const response = await route.fetch({ url: request.url().replace(a, b) });
+			const response = await route.fetch({
+				url: request.url().replace(a, b),
+				headers: { ...request.headers(), 'x-forwarded-host': new URL(a).host },
+			});
 			return route.fulfill({ response });
 		});
 
@@ -102,6 +108,6 @@ test('two nodes built from the same source disagree on server action IDs', async
 		expect(replayed).toEqual({ status: 409, actionNotFound: '1' });
 		expect(shown).toContain(ACTION_NOT_FOUND);
 	} finally {
-		await Promise.all([nodeA.stop(), nodeB.stop()]);
+		await Promise.all(nodes.map((node) => node.stop()));
 	}
 });
