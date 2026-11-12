@@ -194,6 +194,53 @@ The `files` option is now optional with plugins. This make configuration simpler
 Glob pattern specifying which files Harper should watch for changes. Example: `'/app/*'`.
 -->
 
+## Partial Prerendering (PPR)
+
+[Partial Prerendering](https://nextjs.org/docs/app/getting-started/caching#prerendering) works with no plugin options. The plugin serves requests through Next.js's own request handler, so Harper sends the prerendered static shell first and streams the dynamic parts in as they resolve. This holds over HTTP/1.1 and HTTP/2, with or without compression.
+
+PPR needs Next.js 16, where it is enabled by `cacheComponents`. Stable Next.js 14 and 15 releases reject the older `experimental.ppr` flag, which only works on their canary builds.
+
+```js
+// next.config.mjs
+import { withHarper, cacheHandlerPath } from '@harperfast/nextjs';
+
+export default withHarper(
+	{
+		cacheComponents: true,
+		cacheHandler: cacheHandlerPath(import.meta.dirname),
+	},
+	{ useCache: true, configDir: import.meta.dirname }
+);
+```
+
+Only `cacheComponents: true` is required. The `cacheHandler` and [`useCache`](#usecache) settings are optional. They store regenerated pages and `'use cache'` entries in Harper, so every worker and node shares them. Without them, Next.js keeps those entries on each node's disk and in each worker's memory. See [Caching](#caching-work-in-progress).
+
+Wrap dynamic content in `<Suspense>`. Everything outside it becomes the static shell:
+
+```js
+// app/product/page.js
+import { Suspense } from 'react';
+import { cookies } from 'next/headers';
+
+async function Cart() {
+	const cart = (await cookies()).get('cart')?.value ?? 'empty';
+	return <p>Cart: {cart}</p>;
+}
+
+export default function ProductPage() {
+	return (
+		<main>
+			<h1>Product</h1>
+			<Suspense fallback={<p>Loading cart…</p>}>
+				<Cart />
+			</Suspense>
+		</main>
+	);
+}
+```
+
+A response that served a static shell carries the `x-nextjs-postponed: 1` header.
+
 ## Versioned filesystem cache
 
 To keep Next.js's incremental render and data caches on disk while isolating deployments, use `versionedCacheHandlerPath()` in `next.config.mjs` or `next.config.ts`:
