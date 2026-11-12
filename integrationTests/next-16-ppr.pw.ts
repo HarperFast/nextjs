@@ -84,6 +84,7 @@ for (const { name, encoding } of cases) {
 				: await getHttp1(`${harper.httpURL}/ppr`, headers);
 
 		expect(timeline.status).toBe(200);
+		expect(timeline.headers['content-encoding']).toBe(encoding === 'gzip' ? 'gzip' : undefined);
 		expect(timeline.headers['x-nextjs-postponed']).toBe('1');
 		expect(timeline.shellAtMs).toBeDefined();
 		expect(timeline.dynamicAtMs).toBeDefined();
