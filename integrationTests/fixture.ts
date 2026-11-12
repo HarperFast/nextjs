@@ -3,9 +3,12 @@ import { createRequire } from 'node:module';
 import {
 	createHarperContext,
 	setupHarperWithFixture,
+	startHarper,
+	killHarper,
 	teardownHarper,
 	HarperStartupError,
 	type HarperContext,
+	type StartHarperOptions,
 } from '@harperfast/integration-testing';
 import { test as base, expect } from '@playwright/test';
 
@@ -37,43 +40,71 @@ export interface FixtureOptions {
 	http?: Record<string, unknown>;
 }
 
-export function makeHarperFixture(fixtureName: string, { env, applications, http }: FixtureOptions = {}) {
-	return async ({}: {}, use: (harper: HarperContext) => Promise<void>) => {
-		const fixturePath = join(import.meta.dirname, '..', 'fixtures', fixtureName);
-		const ctx = createHarperContext(fixtureName);
+function startOptions({ env, applications, http }: FixtureOptions = {}): StartHarperOptions {
+	return {
+		harperBinPath: getHarperBinPath(),
+		startupTimeoutMs: STARTUP_TIMEOUT_MS,
+		...(env && { env }),
+		config: {
+			logging: {
+				stdStreams: true,
+			},
+			applications: {
+				lockdown: 'none',
+				moduleLoader: 'none',
+				dependencyLoader: 'native',
+				allowedDirectory: 'any',
+				...applications,
+			},
+			...(http && { http }),
+		},
+	};
+}
 
-		let started;
-		try {
-			started = await setupHarperWithFixture(ctx, fixturePath, {
-				harperBinPath: getHarperBinPath(),
-				startupTimeoutMs: STARTUP_TIMEOUT_MS,
-				...(env && { env }),
-				config: {
-					logging: {
-						stdStreams: true,
-					},
-					applications: {
-						lockdown: 'none',
-						moduleLoader: 'none',
-						dependencyLoader: 'native',
-						allowedDirectory: 'any',
-						...applications,
-					},
-					...(http && { http }),
-				},
-			});
-		} catch (error) {
-			if (error instanceof HarperStartupError) {
-				console.error(`[${fixtureName}] Harper failed to start`);
-				if (error.stdout) console.error(`[${fixtureName}] stdout:\n${error.stdout}`);
-				if (error.stderr) console.error(`[${fixtureName}] stderr:\n${error.stderr}`);
-			}
-			throw error;
+async function reportStartupFailure<T>(fixtureName: string, start: () => Promise<T>): Promise<T> {
+	try {
+		return await start();
+	} catch (error) {
+		if (error instanceof HarperStartupError) {
+			console.error(`[${fixtureName}] Harper failed to start`);
+			if (error.stdout) console.error(`[${fixtureName}] stdout:\n${error.stdout}`);
+			if (error.stderr) console.error(`[${fixtureName}] stderr:\n${error.stderr}`);
 		}
+		throw error;
+	}
+}
 
-		await use(started.harper);
+export interface FixtureInstance {
+	readonly harper: HarperContext;
+	/** Stop the Harper process and start it again on the same data directory and address. */
+	restart(): Promise<void>;
+	stop(): Promise<void>;
+}
 
-		await teardownHarper(started);
+/** Start a Harper instance for a fixture outside the worker-scoped `harper` fixture, e.g. a second node. */
+export async function startFixture(fixtureName: string, options?: FixtureOptions): Promise<FixtureInstance> {
+	const fixturePath = join(import.meta.dirname, '..', 'fixtures', fixtureName);
+	const startHarperOptions = startOptions(options);
+	let started = await reportStartupFailure(fixtureName, () =>
+		setupHarperWithFixture(createHarperContext(fixtureName), fixturePath, startHarperOptions)
+	);
+	return {
+		get harper() {
+			return started.harper;
+		},
+		async restart() {
+			await killHarper(started);
+			started = await reportStartupFailure(fixtureName, () => startHarper(started, startHarperOptions));
+		},
+		stop: () => teardownHarper(started),
+	};
+}
+
+export function makeHarperFixture(fixtureName: string, options?: FixtureOptions) {
+	return async ({}: {}, use: (harper: HarperContext) => Promise<void>) => {
+		const instance = await startFixture(fixtureName, options);
+		await use(instance.harper);
+		await instance.stop();
 	};
 }
 
