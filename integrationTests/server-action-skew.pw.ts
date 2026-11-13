@@ -3,8 +3,6 @@ import { join } from 'node:path';
 import { test, expect, type Page } from '@playwright/test';
 import { startFixture, type FixtureInstance } from './fixture.ts';
 
-// A build that doesn't know an action makes the open page reload once instead of throwing. Nodes that build
-// separately still disagree on action IDs (HarperFast/nextjs#82); the guard cookie keeps that to one reload.
 const FIXTURE = 'next-16-server-actions';
 const ACTION_NOT_FOUND = 'was not found on the server';
 const GUARD_COOKIE = '__harper_nextjs_action_reload';
@@ -127,6 +125,44 @@ test('a renamed action reloads the page even when every build shares one key', a
 	}
 });
 
+test('a page under a basePath reloads to the same page', async ({ page }) => {
+	const node = await startFixture(FIXTURE);
+	try {
+		const config = join(componentDir(node.harper.dataRootDir), 'next.config.mjs');
+		await node.restart(() => {
+			removeBuild(node)();
+			writeFileSync(config, readFileSync(config, 'utf8').replace('withHarper({})', "withHarper({ basePath: '/docs' })"));
+		});
+		await page.goto(`${node.harper.httpURL}/docs?tab=1`);
+		const original = await clickPing(page);
+		await expect(page.getByTestId('result')).toHaveText('pong');
+		await markDocument(page);
+
+		await node.restart(removeBuild(node));
+		await clickPing(page);
+		await expect.poll(() => isSameDocument(page)).toBe(false);
+		expect(new URL(page.url()).pathname + new URL(page.url()).search).toBe('/docs?tab=1');
+		await clickPing(page);
+		await expect(page.getByTestId('result')).toHaveText('pong');
+
+		const replayed = await fetch(`${node.harper.httpURL}/docs?tab=1`, {
+			method: 'POST',
+			headers: {
+				accept: 'text/x-component',
+				'content-type': original.headers['content-type'],
+				'next-action': original.id,
+				'next-router-state-tree': original.headers['next-router-state-tree'],
+			},
+			body: original.body,
+		});
+		await replayed.arrayBuffer();
+		expect(replayed.headers.get('x-action-redirect')).toBe('/?tab=1;replace');
+		expect(replayed.headers.getSetCookie().find((value) => value.startsWith(`${GUARD_COOKIE}=1;`))).toContain('Path=/docs;');
+	} finally {
+		await node.stop();
+	}
+});
+
 test('reloadOnMissingAction: false keeps Next.js’s error', async ({ page }) => {
 	const node = await startFixture(FIXTURE);
 	try {
@@ -174,7 +210,6 @@ test('two nodes built from the same source still disagree on action IDs; the pag
 		const fromA = await clickPing(page);
 		await expect.poll(() => isSameDocument(page)).toBe(false);
 		await expect(page.getByTestId('result')).toHaveText('idle');
-		// The second miss carries the guard cookie, so Next.js's error surfaces instead of another reload.
 		await markDocument(page);
 		await clickPing(page);
 		await expect(page.getByTestId('result')).toContainText(ACTION_NOT_FOUND);

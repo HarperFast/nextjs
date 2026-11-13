@@ -22,7 +22,7 @@ Namespaces and ownership markers are retained for operator-managed cleanup after
 
 It runs on Next.js 16 production servers only. Next.js 15's client resolves the action with `undefined` before navigating, so code after `await action()` would run as if the action had succeeded. That also means a tab still running a Next.js 15 client when the server is upgraded to 16 gets that behavior once. Dev mode is excluded, and `reloadOnMissingAction: false` turns it off.
 
-The redirect target is the request path: origin-relative only, with `basePath` removed because the client's `assignLocation` adds it back, and `;` escaped because the client splits the header on `;`. Anything else, or any error while setting the headers, leaves Next's own response in place.
+The redirect target is the request path, captured when the wrapper is installed because Next.js 16 strips `basePath` from `req.url` before it handles the action. It must be origin-relative, with `basePath` removed because the client's `assignLocation` adds it back, and `;` escaped because the client splits the header on `;`. Anything else, or any error while setting the headers, leaves Next's own response in place.
 
 The guard cookie (`__harper_nextjs_action_reload`, 30 seconds) bounds reloads for sequential requests from a browser that accepts cookies: the request after a reload carries it and gets Next's error. Requests already in flight before the cookie lands can each reload once, and a browser that rejects cookies reloads on every miss, so an action called on mount that always misses can loop there. The suppressed path never refreshes the cookie. The guard is appended to any `Set-Cookie` already on the response.
 
