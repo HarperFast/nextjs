@@ -1,7 +1,7 @@
 import type { IncomingHttpHeaders, OutgoingHttpHeader } from 'node:http';
 
 export const RELOAD_GUARD_COOKIE = '__harper_nextjs_action_reload';
-export const RELOAD_GUARD_SECONDS = 30;
+const RELOAD_GUARD_SECONDS = 30;
 
 const ACTION_NOT_FOUND_HEADER = 'x-nextjs-action-not-found';
 const ACTION_REDIRECT_HEADER = 'x-action-redirect';
@@ -24,15 +24,19 @@ interface ActionResponse {
  * a full page load into the current build instead; the action never ran, so nothing is lost but local
  * state. Next.js 15's client resolves the action before that load, so callers must not enable this there.
  *
- * A guard cookie allows one reload per browser per {@link RELOAD_GUARD_SECONDS}, so an action that keeps
- * missing (for example one called on mount) surfaces Next.js's error instead of reloading forever.
+ * A guard cookie stops the request after a reload from reloading again for {@link RELOAD_GUARD_SECONDS}, so an
+ * action that keeps missing surfaces Next.js's error. It only bounds sequential requests from a browser that
+ * returns the cookie; requests already in flight can each reload, and a browser that rejects it can loop.
+ *
+ * The request URL is read now because Next.js strips `basePath` from `request.url` before handling the action.
  */
 export function reloadOnMissingAction(request: ActionRequest, response: ActionResponse, basePath: string): void {
 	if (request.method !== 'POST' || request.headers['next-action'] === undefined) return;
+	const url = request.url;
 	const setHeader = response.setHeader;
 	response.setHeader = function (this: ActionResponse, name: string, value: OutgoingHttpHeader) {
 		if (typeof name === 'string' && name.toLowerCase() === ACTION_NOT_FOUND_HEADER && String(value) === '1') {
-			const location = hasGuardCookie(request.headers.cookie) ? undefined : reloadLocation(request.url, basePath);
+			const location = hasGuardCookie(request.headers.cookie) ? undefined : reloadLocation(url, basePath);
 			if (location !== undefined) {
 				try {
 					const cookies = appendCookie(this.getHeader('set-cookie'), guardCookie(basePath));

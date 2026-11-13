@@ -105,6 +105,15 @@ describe('reloadOnMissingAction', () => {
 		assert.deepStrictEqual(several.headers.get('set-cookie'), ['a=1', 'b=2', GUARD]);
 	});
 
+	it('uses the URL as received, before Next.js strips the basePath from it', () => {
+		const request = actionRequest({ url: '/docs/page?x=1' });
+		const response = fakeResponse();
+		reloadOnMissingAction(request, response, '/docs');
+		request.url = '/page?x=1';
+		response.setHeader('x-nextjs-action-not-found', '1');
+		assert.strictEqual(response.headers.get('x-action-redirect'), '/page?x=1;replace');
+	});
+
 	it('scopes the guard cookie to the basePath', () => {
 		const response = fakeResponse();
 		reloadOnMissingAction(actionRequest({ url: '/docs/page' }), response, '/docs');
