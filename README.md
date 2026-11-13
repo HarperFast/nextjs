@@ -191,6 +191,9 @@ When enabled, the Next.js request handler runs before any other Harper HTTP midd
 
 After a deploy, a page loaded from the previous build can call a server action the new build doesn't have. Next.js answers that request with an error, and its client throws `UnrecognizedActionError`. With this option, the plugin turns that response into a full page load of the current page, so the user lands on the new build. The action does not run, and any unsaved state on the page is lost, so the user has to repeat it. To stop a loop, a cookie makes the next missing action within 30 seconds return the error to the app instead of reloading again. That only works when the browser accepts cookies: with cookies blocked, an action that runs on page load and always misses reloads the page repeatedly. Two action calls already in flight can each cause a reload. Applies to Next.js 16 in production only. Defaults to `true`.
 
+> [!WARNING]
+> When a deploy upgrades an app from Next.js 15 to 16, a tab still running the Next.js 15 client treats the reload response as a successful action that returned `undefined`. Code after `await action()` runs once before the page reloads, even though the action never ran. If that code discards data, set this option to `false` for the upgrade deploy.
+
 Set it to `false` if your app handles `UnrecognizedActionError` itself:
 
 ```yaml
