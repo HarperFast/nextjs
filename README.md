@@ -187,6 +187,18 @@ Specify a custom HTTPS port for the Next.js server. Defaults to the Harper defau
 
 When enabled, the Next.js request handler runs before any other Harper HTTP middleware. Useful for scenarios where Next.js handles authentication directly. Note that enabling this will conflict with Harper's REST API on the same port — consider using a dedicated `port` to avoid conflicts. Defaults to `false`.
 
+### `reloadOnMissingAction: boolean`
+
+After a deploy, a page loaded from the previous build can call a server action the new build doesn't have. Next.js answers that request with an error, and its client throws `UnrecognizedActionError`. With this option, the plugin turns that response into a full page load of the current page, so the user lands on the new build. The action does not run, and any unsaved state on the page is lost, so the user has to repeat it. To stop a loop, a browser reloads at most once every 30 seconds; after that, the error reaches the app as before. Applies to Next.js 16 in production only. Defaults to `true`.
+
+Set it to `false` if your app handles `UnrecognizedActionError` itself:
+
+```yaml
+'@harperfast/nextjs':
+  package: '@harperfast/nextjs'
+  reloadOnMissingAction: false
+```
+
 <!--
 The `files` option is now optional with plugins. This make configuration simpler in general. The plugin doesn't currently have any special file handling too. If the app changes, harper needs to be restarted. This is common behavior for applications. The default file handler mechanism in core will alert. In the future,
 ### `files: string`

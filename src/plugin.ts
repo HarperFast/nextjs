@@ -17,6 +17,7 @@ import { existsSync, readFileSync } from 'node:fs';
 
 import { withBuildLock } from './buildLock.js';
 import { adaptHttp2ForNext } from './http2Compat.js';
+import { reloadOnMissingAction } from './actionReload.js';
 import { OLD_BUILD_SWEEP_DELAY_MS, oldBuildSweepEnabled, sweepOtherBuilds } from './buildSweep.js';
 
 import type NextModule14 from 'next-14';
@@ -39,6 +40,7 @@ interface NextPluginConfig extends Config {
 	files?: FilesOption;
 	port?: number;
 	prebuilt: boolean;
+	reloadOnMissingAction: boolean;
 	runFirst: boolean;
 	securePort?: number;
 }
@@ -86,6 +88,7 @@ function resolveConfig(scope: Scope): NextPluginConfig {
 	assertType('dev', options.dev, 'boolean');
 	assertType('port', options.port, 'number');
 	assertType('prebuilt', options.prebuilt, 'boolean');
+	assertType('reloadOnMissingAction', options.reloadOnMissingAction, 'boolean');
 	assertType('runFirst', options.runFirst, 'boolean');
 	assertType('securePort', options.securePort, 'number');
 
@@ -104,6 +107,7 @@ function resolveConfig(scope: Scope): NextPluginConfig {
 		files: options.files,
 		port: options.port as number,
 		prebuilt: (options.prebuilt as boolean) ?? false,
+		reloadOnMissingAction: (options.reloadOnMissingAction as boolean) ?? true,
 		runFirst: (options.runFirst as boolean) ?? false,
 		securePort: options.securePort as number,
 	} satisfies NextPluginConfig;
@@ -403,6 +407,17 @@ async function runNextBuild(scope: Scope, config: NextPluginConfig, next: NextPa
 	}
 }
 
+/** The app's `basePath` from the build, or `undefined` (reload disabled) when the manifest can't be read. */
+function readBasePath(scope: Scope): string | undefined {
+	try {
+		const manifest = JSON.parse(readFileSync(join(scope.directory, '.next', 'routes-manifest.json'), 'utf8'));
+		return typeof manifest.basePath === 'string' ? manifest.basePath : '';
+	} catch (error) {
+		scope.logger.warn?.('Could not read basePath from .next/routes-manifest.json; pages will not reload when a server action is missing: ', error);
+		return undefined;
+	}
+}
+
 async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) {
 	scope.logger.debug?.(`Serving Next.js application at ${scope.directory}`);
 	const cacheBindings = !config.dev
@@ -442,11 +457,16 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 	}
 
 	const requestHandler = app.getRequestHandler();
+	const missingActionBasePath =
+		config.reloadOnMissingAction && !config.dev && next.version === 16 ? readBasePath(scope) : undefined;
 
 	scope.server?.http?.(
 		(request, next) => {
 			if (request._nodeResponse === undefined) return next(request);
 			adaptHttp2ForNext(request._nodeRequest, request._nodeResponse);
+			if (missingActionBasePath !== undefined) {
+				reloadOnMissingAction(request._nodeRequest, request._nodeResponse, missingActionBasePath);
+			}
 			// @ts-expect-error - Not sure when the IncomingMessage.url could be undefined ; need to dig into it.
 			return requestHandler(request._nodeRequest, request._nodeResponse, urlParse(request._nodeRequest.url, true));
 		},
