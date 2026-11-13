@@ -89,7 +89,9 @@ function makeInvalidationTable(rows: Array<{ id: string } & Record<string, unkno
 			this.puts.push({ key, value, context });
 			const version = context?.timestamp;
 			const stored = this.versions.get(key);
-			if (version !== undefined && stored !== undefined && version < stored) return;
+			// Harper keeps the stored record when the incoming version is not strictly newer, so an equal
+			// version is dropped rather than applied.
+			if (version !== undefined && stored !== undefined && version <= stored) return;
 			if (version !== undefined) this.versions.set(key, version);
 			const row = { id: key, ...value };
 			const index = rows.findIndex((existing) => existing.id === key);
@@ -938,6 +940,94 @@ describe('two invalidations issued in the same millisecond', () => {
 			'expired',
 			'the hard expiry was downgraded to stale, so the worker serves what it had to withhold'
 		);
+	});
+});
+
+/**
+ * Each tag has one tombstone row, written blind from the issuing worker's own view, and the newest
+ * version wins. Invalidation is not last-writer-wins, so a worker that has not seen another's
+ * immediate expiry overwrites it, and two writes that tie on version lose one outright.
+ *
+ * `hardExpiredAt` makes a passed expiry irrevocable within a view and persists it, but only what the
+ * writing worker knew. Closing this needs a merge against stored state — a compare-and-merge write,
+ * or an append-only invalidation log.
+ *
+ * The first two tests fail by design: they assert what the fix must produce, and they are the fix's
+ * acceptance tests. The remaining three pass today and pin the boundary — a fix must keep them passing.
+ */
+describe('tombstone merge across isolated workers', () => {
+	beforeEach(() => resetInvalidationStateForTesting());
+
+	/** A worker that has seen nothing the others did: a fresh in-memory view over the one shared table. */
+	async function asIsolatedWorker(body: () => Promise<void>): Promise<void> {
+		resetInvalidationStateForTesting();
+		await body();
+	}
+
+	/** What a worker starting cold knows: only what storage holds. */
+	async function hydrateFreshWorker(table: ReturnType<typeof makeInvalidationTable>, now: number): Promise<void> {
+		resetInvalidationStateForTesting();
+		await hydrateInvalidations(table, { tagsManifestModule: null, now: () => now });
+	}
+
+	it('keeps an immediate expiry another worker has not seen yet', async () => {
+		const table = makeInvalidationTable();
+
+		// A: everything written before t=1000 is dead.
+		await asIsolatedWorker(() => recordInvalidation(['posts'], undefined, makeDeps({ invalidation: table, now: 1000 })));
+		// B, before A's tombstone reaches it: stale now, expire in a minute. B has nothing to merge with,
+		// and its version is newer, so its row replaces A's.
+		await asIsolatedWorker(() => recordInvalidation(['posts'], { expire: 60 }, makeDeps({ invalidation: table, now: 2000 })));
+
+		await hydrateFreshWorker(table, 3000);
+
+		assert.equal(tagState(['posts'], 500, 3000), 'expired', 'an entry the immediate expiry killed is served stale');
+	});
+
+	it('keeps an immediate expiry issued in the same millisecond as a profiled one', async () => {
+		const table = makeInvalidationTable();
+
+		// `lastTombstoneVersion` is per-worker, so both write with `now` and the second ties.
+		await asIsolatedWorker(() => recordInvalidation(['posts'], { expire: 60 }, makeDeps({ invalidation: table, now: 1000 })));
+		await asIsolatedWorker(() => recordInvalidation(['posts'], undefined, makeDeps({ invalidation: table, now: 1000 })));
+
+		await hydrateFreshWorker(table, 2000);
+
+		assert.equal(tagState(['posts'], 500, 2000), 'expired', 'the immediate expiry never reached storage');
+	});
+
+	// The boundary of the defect: one form used consistently per tag orders correctly on its own, which
+	// is what the README tells callers to rely on. A fix must keep these passing.
+	it('is unaffected when every invalidation of the tag is immediate', async () => {
+		const table = makeInvalidationTable();
+		await asIsolatedWorker(() => recordInvalidation(['posts'], undefined, makeDeps({ invalidation: table, now: 1000 })));
+		await asIsolatedWorker(() => recordInvalidation(['posts'], undefined, makeDeps({ invalidation: table, now: 2000 })));
+
+		await hydrateFreshWorker(table, 3000);
+
+		assert.equal(tagState(['posts'], 500, 3000), 'expired');
+		assert.equal(tagState(['posts'], 1500, 3000), 'expired', 'the newer immediate expiry still applies');
+	});
+
+	it('is unaffected when immediate invalidations tie on version', async () => {
+		const table = makeInvalidationTable();
+		await asIsolatedWorker(() => recordInvalidation(['posts'], undefined, makeDeps({ invalidation: table, now: 1000 })));
+		await asIsolatedWorker(() => recordInvalidation(['posts'], undefined, makeDeps({ invalidation: table, now: 1000 })));
+
+		await hydrateFreshWorker(table, 2000);
+
+		assert.equal(tagState(['posts'], 500, 2000), 'expired', 'both writes said the same thing');
+	});
+
+	it('is unaffected when every invalidation of the tag is profiled', async () => {
+		const table = makeInvalidationTable();
+		await asIsolatedWorker(() => recordInvalidation(['posts'], { expire: 60 }, makeDeps({ invalidation: table, now: 1000 })));
+		await asIsolatedWorker(() => recordInvalidation(['posts'], { expire: 60 }, makeDeps({ invalidation: table, now: 2000 })));
+
+		await hydrateFreshWorker(table, 3000);
+
+		assert.equal(tagState(['posts'], 500, 3000), 'stale');
+		assert.equal(tagState(['posts'], 500, 70_000), 'expired', 'the later window supersedes and still expires');
 	});
 });
 
