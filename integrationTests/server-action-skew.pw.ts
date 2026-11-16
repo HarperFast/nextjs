@@ -44,6 +44,14 @@ function isSameDocument(page: Page) {
 	return page.evaluate(() => (window as any).__beforeDeploy === true);
 }
 
+async function clickPingAndReload(page: Page): Promise<CapturedAction> {
+	const reloaded = page.waitForEvent('load');
+	const sent = await clickPing(page);
+	await reloaded;
+	expect(await isSameDocument(page)).toBe(false);
+	return sent;
+}
+
 async function replay(origin: string, action: CapturedAction, cookie?: string) {
 	const response = await fetch(`${origin}/`, {
 		method: 'POST',
@@ -79,8 +87,7 @@ test('a page open across a rebuild reloads once when its action is missing, then
 		await node.restart(removeBuild(node));
 		expect(buildId(node.harper.dataRootDir)).not.toBe(before);
 
-		await clickPing(page);
-		await expect.poll(() => isSameDocument(page)).toBe(false);
+		await clickPingAndReload(page);
 		await expect(page.getByTestId('result')).toHaveText('idle');
 		expect((await page.context().cookies()).map((cookie) => cookie.name)).toContain(GUARD_COOKIE);
 		const rebuilt = await clickPing(page);
@@ -115,8 +122,7 @@ test('a renamed action reloads the page even when every build shares one key', a
 			writeFileSync(button, readFileSync(button, 'utf8').replace('{ ping }', '{ pingRenamed as ping }'));
 		});
 
-		await clickPing(page);
-		await expect.poll(() => isSameDocument(page)).toBe(false);
+		await clickPingAndReload(page);
 		const renamed = await clickPing(page);
 		await expect(page.getByTestId('result')).toHaveText('pong');
 		expect(renamed.id).not.toBe(original.id);
@@ -139,8 +145,7 @@ test('a page under a basePath reloads to the same page', async ({ page }) => {
 		await markDocument(page);
 
 		await node.restart(removeBuild(node));
-		await clickPing(page);
-		await expect.poll(() => isSameDocument(page)).toBe(false);
+		await clickPingAndReload(page);
 		expect(new URL(page.url()).pathname + new URL(page.url()).search).toBe('/docs?tab=1');
 		await clickPing(page);
 		await expect(page.getByTestId('result')).toHaveText('pong');
@@ -207,8 +212,7 @@ test('two nodes built from the same source still disagree on action IDs; the pag
 
 		await page.goto(a);
 		await markDocument(page);
-		const fromA = await clickPing(page);
-		await expect.poll(() => isSameDocument(page)).toBe(false);
+		const fromA = await clickPingAndReload(page);
 		await expect(page.getByTestId('result')).toHaveText('idle');
 		await markDocument(page);
 		await clickPing(page);
