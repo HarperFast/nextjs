@@ -14,7 +14,8 @@ import type {
 
 import type { databases as DatabasesType } from 'harper';
 
-import { cacheNamespaceFor, namespacedCacheKey } from './cacheNamespace.cjs';
+import { cacheKeyPrefixFor } from './cacheNamespace.cjs';
+import { toStorageKey } from './storageKey.cjs';
 import {
 	entryExpiresAt,
 	initializeInvalidationSubscription,
@@ -85,13 +86,13 @@ function isExpired(record: { lastModified?: number; expire?: number }): boolean 
 
 export default class HarperCacheHandler implements CacheHandler {
 	private revalidatedTags: string[];
-	// The Harper application this handler stores entries for; see cacheNamespace.cts. Tags are not namespaced: they
-	// name data, and applications sharing the data share its invalidations.
-	private namespace: string | undefined;
+	// Undefined caches nothing. Tags are not prefixed: they name data, and applications sharing the data share its
+	// invalidations.
+	private keyPrefix: string | undefined;
 
 	constructor(ctx?: CacheHandlerContext) {
 		this.revalidatedTags = ctx?.revalidatedTags ?? [];
-		this.namespace = cacheNamespaceFor(ctx?.serverDistDir);
+		this.keyPrefix = cacheKeyPrefixFor(ctx?.serverDistDir);
 		void initializeInvalidationSubscription();
 	}
 
@@ -100,12 +101,12 @@ export default class HarperCacheHandler implements CacheHandler {
 		ctx: GetIncrementalFetchCacheContext | GetIncrementalResponseCacheContext
 	): Promise<CacheHandlerValue | null> {
 		const databases = getDatabases();
-		if (!databases) return null;
+		if (!databases || this.keyPrefix === undefined) return null;
 		// A worker that has not read the tombstones back cannot tell an invalidated entry from a fresh one.
 		if (!(await initializeInvalidationSubscription())) return null;
 
 		const table = databases.harperfast_nextjs.nextjs_isr_cache;
-		const record = await table.get(namespacedCacheKey(this.namespace, key));
+		const record = await table.get(toStorageKey(this.keyPrefix + key));
 		if (!record || record.data === undefined) return null;
 
 		// Past its own `expire` the entry is no longer usable at all, regardless of tags.
@@ -139,7 +140,7 @@ export default class HarperCacheHandler implements CacheHandler {
 		ctx: SetIncrementalFetchCacheContext | SetIncrementalResponseCacheContext
 	): Promise<void> {
 		const databases = getDatabases();
-		if (!databases) return;
+		if (!databases || this.keyPrefix === undefined) return;
 
 		const table = databases.harperfast_nextjs.nextjs_isr_cache;
 		const tags = extractTags(data, ctx);
@@ -155,7 +156,7 @@ export default class HarperCacheHandler implements CacheHandler {
 		// the table's own expiration rather than pinned for the year `toStoredLife` bounds it to.
 		const expiresAt = entryExpiresAt(now, cacheControl?.expire, now);
 		await table.put(
-			namespacedCacheKey(this.namespace, key),
+			toStorageKey(this.keyPrefix + key),
 			{ data, tags, revalidate, expire },
 			expiresAt === undefined ? undefined : ({ expiresAt } as never)
 		);

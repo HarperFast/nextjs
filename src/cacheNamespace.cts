@@ -1,57 +1,65 @@
-import { sep } from 'node:path';
+import { resolve, sep } from 'node:path';
 
 /**
- * Which Harper application each Next.js app directory belongs to, so the Harper-backed cache handler can keep each
- * application's entries apart.
+ * Next.js keys an incremental-cache entry by its source route or a digest of the call, never by the app, so two
+ * applications on one Harper instance would share `nextjs_isr_cache` rows. The plugin registers each app directory
+ * under its Harper application name, and the handler prefixes its keys with that name.
  *
- * Next.js keys an incremental-cache entry by the route (`/route-cache/<kind>/<sha256 of the source route>/$<path>`)
- * or by a digest of a `fetch()` or `unstable_cache()` call, never by the app. Two applications on one Harper
- * instance that both serve `/` would otherwise read and write the same row of `nextjs_isr_cache`: a pull request
- * preview running on the cluster's shared data, for example, renders its page into the row production serves.
- *
- * The plugin registers each app before Next.js constructs its handler, which then finds its application by the
- * `serverDistDir` Next.js passes it. The map lives on a `Symbol.for` global because Next.js `require`s the handler
- * natively while Harper loads the plugin through its own loader, so the two can hold separate copies of this module.
+ * The registry lives on a `Symbol.for` global: Next.js `require`s the handler natively, while Harper loads the plugin
+ * through its own loader, so the two can hold separate copies of this module.
  */
+interface Registry {
+	/** Resolved app directory, with a trailing separator, to its key prefix. */
+	prefixes: Map<string, string>;
+	/** A handler's `serverDistDir` to its prefix, or null when it matches no app; Next.js builds a handler per request. */
+	lookups: Map<string, string | null>;
+}
 const registryKey = Symbol.for('@harperfast/nextjs.cache-namespaces.v1');
-const nativeGlobal = globalThis as unknown as Record<symbol, Map<string, string>>;
-const namespaces = (nativeGlobal[registryKey] ??= new Map());
+const nativeGlobal = globalThis as unknown as Record<symbol, Registry>;
+const registry = (nativeGlobal[registryKey] ??= { prefixes: new Map(), lookups: new Map() });
 
-/** Record that the Next.js app in `appDirectory` is served as Harper application `applicationName`. */
 export function registerCacheNamespace(appDirectory: string, applicationName: string): void {
-	namespaces.set(appDirectory, applicationName);
+	registry.prefixes.set(resolve(appDirectory) + sep, `${applicationName}:`);
+	registry.lookups.clear();
+}
+
+export function unregisterCacheNamespace(appDirectory: string): void {
+	if (registry.prefixes.delete(resolve(appDirectory) + sep)) registry.lookups.clear();
 }
 
 /**
- * The application whose app directory holds `serverDistDir` (any `distDir` works). Without one, as when Next.js's
- * middleware adapter constructs the handler, the worker's only registered application, which is always the case in an
- * isolated application's own worker. Undefined when that cannot be told, and the handler then uses Next.js's key as is.
+ * The key prefix of the application whose directory holds `serverDistDir`, or, without one (Next.js's middleware
+ * adapter passes none), of the worker's only application, as in an isolated application's worker. Undefined when it
+ * cannot be told; the handler then caches nothing, since a key without a prefix is every application's.
  */
-export function cacheNamespaceFor(serverDistDir: string | undefined): string | undefined {
-	if (serverDistDir === undefined) {
-		const names = new Set(namespaces.values());
-		return names.size === 1 ? names.values().next().value : undefined;
+export function cacheKeyPrefixFor(serverDistDir: string | undefined): string | undefined {
+	const lookup = serverDistDir ?? '';
+	let prefix = registry.lookups.get(lookup);
+	if (prefix === undefined) {
+		prefix = serverDistDir === undefined ? onlyPrefix() : longestMatch(resolve(serverDistDir));
+		registry.lookups.set(lookup, prefix);
 	}
-	let match: string | undefined;
+	return prefix ?? undefined;
+}
+
+function onlyPrefix(): string | null {
+	const prefixes = new Set(registry.prefixes.values());
+	return prefixes.size === 1 ? prefixes.values().next().value! : null;
+}
+
+function longestMatch(serverDistDir: string): string | null {
+	let match: string | null = null;
 	let matchLength = -1;
-	for (const [appDirectory, applicationName] of namespaces) {
-		if (appDirectory.length > matchLength && serverDistDir.startsWith(appDirectory + sep)) {
-			match = applicationName;
-			matchLength = appDirectory.length;
+	for (const [directory, prefix] of registry.prefixes) {
+		if (directory.length > matchLength && serverDistDir.startsWith(directory)) {
+			match = prefix;
+			matchLength = directory.length;
 		}
 	}
 	return match;
 }
 
-/**
- * The storage key for Next.js's `key` in `namespace`. A Next.js key starts with `/` or is a hex digest, and a deployed
- * Harper application's name is letters, digits, `-` and `_`, so a namespaced key can never equal another
- * application's or an un-namespaced one.
- */
-export function namespacedCacheKey(namespace: string | undefined, key: string): string {
-	return namespace === undefined ? key : `${namespace}:${key}`;
-}
-
 export function resetCacheNamespacesForTesting(): void {
-	namespaces.clear();
+	registry.prefixes.clear();
+	registry.lookups.clear();
 }
