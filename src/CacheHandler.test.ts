@@ -425,13 +425,24 @@ describe('HarperCacheHandler keeps each application\'s entries apart', () => {
 
 	it("uses the worker's only application when Next.js passes no serverDistDir", async () => {
 		const { puts } = installDatabases({}, {}, noApplication);
-		cacheNamespaces.registerCacheNamespace('/srv/components/shop', 'shop');
+		const shop = cacheNamespaces.registerCacheNamespace('/srv/components/shop', 'shop');
 		cacheNamespaces.registerCacheNamespace('/srv/components/shop-pr-7', 'shop-pr-7');
-		cacheNamespaces.unregisterCacheNamespace('/srv/components/shop');
+		cacheNamespaces.unregisterCacheNamespace('/srv/components/shop', shop);
 
 		await new HarperCacheHandler().set('/a', page('x') as never, pageCtx);
 
 		assert.equal(puts[0].key, 'shop-pr-7:/a');
+	});
+
+	it("leaves a retried load's registration when the earlier load fails afterwards", async () => {
+		const { puts } = installDatabases({}, {}, noApplication);
+		const failedLoad = cacheNamespaces.registerCacheNamespace('/srv/components/shop', 'shop');
+		cacheNamespaces.registerCacheNamespace('/srv/components/shop', 'shop');
+		cacheNamespaces.unregisterCacheNamespace('/srv/components/shop', failedLoad);
+
+		await new HarperCacheHandler({ serverDistDir: '/srv/components/shop/.next/server' }).set('/a', page('x') as never, pageCtx);
+
+		assert.equal(puts[0].key, 'shop:/a');
 	});
 
 	it('caches nothing when it cannot tell the application, rather than share a key', async () => {

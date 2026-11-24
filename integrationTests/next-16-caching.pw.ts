@@ -13,11 +13,12 @@ function authHeader(harper: HarperContext): string {
 	return `Basic ${Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString('base64')}`;
 }
 
-// Next.js response-cache keys are opaque: a route's row is the one whose key is, or ends with
-// `/$` plus, the pathname in `normalizePagePath` form (`/` becomes `/index`).
+// Stored ids are `<application>:<Next.js key>`. Next.js response-cache keys are opaque: a route's row is
+// the one whose key is, or ends with `/$` plus, the pathname in `normalizePagePath` form (`/` becomes `/index`).
 function isCacheKeyForRoute(id: string, pathname: string): boolean {
 	const normalized = pathname === '/' ? '/index' : pathname;
-	return id === normalized || id.endsWith(`/$${normalized}`);
+	const key = id.slice(id.indexOf(':') + 1);
+	return key === normalized || key.endsWith(`/$${normalized}`);
 }
 
 // `search_value: '*'` is an unconditional full scan. The table also holds `unstable_cache` fetch
