@@ -18,6 +18,7 @@ import { withBuildLock, type BuildInfoTable } from './buildLock.js';
 import { reloadOnMissingAction } from './actionReload.js';
 import { createNextHttpHandler, type NextRequestHandler } from './requestHandoff.js';
 import { OLD_BUILD_SWEEP_DELAY_MS, oldBuildSweepEnabled, sweepOtherBuilds } from './buildSweep.js';
+import { prebuiltBuildId } from './prebuilt.js';
 
 import type NextModule14 from 'next-14';
 import type NextBuildModule14 from 'next-14/dist/cli/next-build.d.ts';
@@ -233,33 +234,18 @@ export async function handleApplication(scope: Scope) {
 		//   - if stale ??? (how do we get here?) (maybe with time-based we don't have stale anymore?)
 		// - else continue with below logic
 		//   - if valid, write success record and goto serve
-		//   - if invalid, write failure record and log and return
+		//   - if invalid, write failure record and throw
 
-		const nextDir = join(scope.directory, '.next');
-		if (!existsSync(nextDir)) {
-			scope.logger.error?.('Prebuilt mode is enabled, but the .next folder does not exist');
-			return;
+		// A missing or empty build throws rather than returning: Harper then fails the deploy, where a quiet return
+		// would let it certify a release that answers every request with a 404.
+		let buildId: string;
+		try {
+			buildId = prebuiltBuildId(scope.directory);
+		} catch (error) {
+			await databases.harperfast_nextjs.nextjs_build_info.put(scope.appName, { buildId: null, status: 'failure' });
+			throw error;
 		}
-
-		if (!existsSync(join(nextDir, 'BUILD_ID'))) {
-			scope.logger.error?.('Prebuilt mode is enabled, but the .next/BUILD_ID file does not exist');
-			return;
-		}
-
-		// In prebuilt mode, we still want to ensure the build is valid by checking for a `buildId`.
-		// We shouldn't try serving (and failing) if we can detect a potentially bad build.
-		// This is based on the assumption that a BUILD_ID file only exists for valid builds; not sure
-		// if that is 100% true or if Next.js provides any other guarantees or validation mechanisms.
-		const buildId = getBuildId(scope);
-		// Immediately set the build info record appropriately
-		await databases.harperfast_nextjs.nextjs_build_info.put(scope.appName, {
-			buildId,
-			status: buildId !== null ? 'success' : 'failure',
-		});
-
-		if (buildId === null) {
-			return;
-		}
+		await databases.harperfast_nextjs.nextjs_build_info.put(scope.appName, { buildId, status: 'success' });
 	} else if (!config.dev) {
 		// If not prebuilt mode and not dev mode, then proceed to building
 		try {
