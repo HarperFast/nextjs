@@ -86,8 +86,7 @@ function isExpired(record: { lastModified?: number; expire?: number }): boolean 
 
 export default class HarperCacheHandler implements CacheHandler {
 	private revalidatedTags: string[];
-	// Undefined caches nothing. Tags are not prefixed: they name data, and applications sharing the data share its
-	// invalidations.
+	// Tags are not prefixed: they name data, and applications sharing the data share its invalidations.
 	private keyPrefix: string | undefined;
 
 	constructor(ctx?: CacheHandlerContext) {

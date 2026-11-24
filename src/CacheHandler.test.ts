@@ -39,10 +39,7 @@ interface InvalidationStorage {
 	failSearch?: boolean;
 }
 
-/**
- * Fake Harper tables. Unless `application` is null, the worker serves one application, `app`, whose handlers store
- * `records` (keyed as Next.js keys them) under its prefix.
- */
+/** `records` are keyed as Next.js keys them; unless `application` is null, the worker serves that one application. */
 function installDatabases(
 	records: Record<string, StoredRecord> = {},
 	invalidation: InvalidationStorage = {},

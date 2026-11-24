@@ -1,7 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-/** The BUILD_ID of the prebuilt `.next` in `directory`; throws, naming what is missing, when there is none to serve. */
 export function prebuiltBuildId(directory: string): string {
 	const nextDir = join(directory, '.next');
 	if (!existsSync(nextDir)) {

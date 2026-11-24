@@ -15,6 +15,8 @@ type NextBuildInfo @table(database: "harperfast_nextjs", table: "nextjs_build_in
 # `tags` is indexed: Harper indexes each element of an array attribute, so the invalidation sweep finds a
 # tag's entries with an `equals` lookup instead of a scan (see sweepTag in src/cacheInvalidation.cts).
 type NextISRCache @table(database: "harperfast_nextjs", table: "nextjs_isr_cache", expiration: 604800) {
+	# `<application>:<Next cache key>`, so applications on one instance never share an entry; see src/cacheNamespace.cts.
+	# Long keys are truncated with a hash, as in nextjs_use_cache.
 	id: String @primaryKey
 	data: Any
 	tags: [String] @indexed
@@ -28,7 +30,7 @@ type NextISRCache @table(database: "harperfast_nextjs", table: "nextjs_isr_cache
 # IncrementalCacheValue keyed off the route.
 type NextUseCache @table(database: "harperfast_nextjs", table: "nextjs_use_cache", expiration: 604800) {
 	# `id` is the STORAGE key: the Next cache key verbatim when it fits, else truncated
-	# with a hash of the full key appended. See toStorageKey() in src/UseCacheHandler.cts —
+	# with a hash of the full key appended. See toStorageKey() in src/storageKey.cts —
 	# Next puts no size limit on a cache key and Harper caps a primary key at 1978 bytes.
 	id: String @primaryKey
 	# The untruncated Next cache key, only when `id` had to be shortened. Not indexed.

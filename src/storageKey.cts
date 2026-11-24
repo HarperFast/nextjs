@@ -23,7 +23,8 @@ const KEY_HASH_BYTES = 16;
 const KEY_HASH_SEPARATOR = '\u0000#';
 
 export function toStorageKey(cacheKey: string): string {
-	if (Buffer.byteLength(cacheKey, 'utf8') <= MAX_KEY_BYTES) return cacheKey;
+	// A UTF-16 code unit is at most 3 UTF-8 bytes, so most keys skip measuring.
+	if (cacheKey.length <= MAX_KEY_BYTES / 3 || Buffer.byteLength(cacheKey, 'utf8') <= MAX_KEY_BYTES) return cacheKey;
 
 	// Hashed over UTF-16 code units, not their UTF-8 encoding. Next composes a key with `encodeReply`,
 	// whose FormData/binary encoding can leave lone surrogates in the string; UTF-8 collapses every one
