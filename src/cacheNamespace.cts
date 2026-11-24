@@ -42,7 +42,8 @@ export function cacheKeyPrefixFor(serverDistDir: string | undefined): string | u
 	if (prefix === undefined) {
 		prefix = serverDistDir === undefined ? onlyPrefix() : longestMatch(resolve(serverDistDir));
 		registry.lookups.set(lookup, prefix);
-		if (prefix === null && serverDistDir !== undefined) {
+		// Outside Harper, as in `next build`, there is no cache to turn off.
+		if (prefix === null && serverDistDir !== undefined && (globalThis as { databases?: unknown }).databases) {
 			getLogger().warn?.(
 				`[@harperfast/nextjs] ${serverDistDir} belongs to no application this worker serves, so its ISR and Data Cache are off`
 			);

@@ -284,6 +284,8 @@ A Next.js app can run as a Harper [pull request preview](https://docs.harper.fas
 - Tag invalidations are shared, because tags name data, and the data is shared. A preview's `revalidateTag()` or `revalidatePath()` also expires production's entries with that tag or path, which costs production one render, and the other way round.
 - The preview's row in `nextjs_build_info` stays after the preview is dropped.
 
+On a branched preview, the `harperfast_nextjs` tables are branched only if they exist when the preview loads, which they do once production has run with this plugin on the cluster. Otherwise the preview's first load creates them in the cluster's databases, shared as with `dataMode=shared` until the preview next loads, on a redeploy or a restart.
+
 **Server actions.** Next.js aborts a server action whose `Origin` does not match the request's host (`Invalid Server Actions request`). A proxy in front of a self-managed cluster must pass the preview's host through in `Host` or `X-Forwarded-Host`.
 
 **`basePath`.** A preview serves the app at the root of its own host, and `basePath` still applies there: with `basePath: '/shop'`, open the preview at `/shop`. The URL the deploy prints and comments on the PR is the host's root.
