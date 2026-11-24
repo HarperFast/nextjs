@@ -234,17 +234,11 @@ export async function handleApplication(scope: Scope) {
 		//   - if stale ??? (how do we get here?) (maybe with time-based we don't have stale anymore?)
 		// - else continue with below logic
 		//   - if valid, write success record and goto serve
-		//   - if invalid, write failure record and throw
+		//   - if invalid, throw without recording it
 
-		// A missing or empty build throws rather than returning: Harper then fails the deploy, where a quiet return
-		// would let it certify a release that answers every request with a 404.
-		let buildId: string;
-		try {
-			buildId = prebuiltBuildId(scope.directory);
-		} catch (error) {
-			await databases.harperfast_nextjs.nextjs_build_info.put(scope.appName, { buildId: null, status: 'failure' });
-			throw error;
-		}
+		// Throws on a missing build, so Harper fails the deploy rather than certifying a release that 404s. It records
+		// nothing then: the row may still describe the release that is serving.
+		const buildId = prebuiltBuildId(scope.directory);
 		await databases.harperfast_nextjs.nextjs_build_info.put(scope.appName, { buildId, status: 'success' });
 	} else if (!config.dev) {
 		// If not prebuilt mode and not dev mode, then proceed to building
@@ -410,11 +404,6 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 	const cacheBindings = !config.dev
 		? createRequire(import.meta.url)('./versionedCache.cjs') as typeof import('./versionedCache.cjs')
 		: undefined;
-	// Before Next.js constructs its cache handler, which looks its application up here.
-	(createRequire(import.meta.url)('./cacheNamespace.cjs') as typeof import('./cacheNamespace.cjs')).registerCacheNamespace(
-		scope.directory,
-		scope.appName
-	);
 	cacheBindings?.markProductionCache(join(scope.directory, '.next', 'server'));
 	const cacheBinding = await cacheBindings?.bindVersionedCache(scope.directory, config.cacheDirectory);
 	if (cacheBinding) scope.logger.debug?.(`Using Next.js versioned cache at ${cacheBinding.cacheDirectory}`);
@@ -432,9 +421,11 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 			break;
 	}
 
-	await app.prepare();
+	const cacheNamespaces = createRequire(import.meta.url)('./cacheNamespace.cjs') as typeof import('./cacheNamespace.cjs');
+	cacheNamespaces.registerCacheNamespace(scope.directory, scope.appName);
 	let nextConfig: { basePath?: string; cacheHandler?: string; distDir?: string } | undefined;
 	try {
+		await app.prepare();
 		type Renderer = { getServer(): Promise<{ nextConfig: NonNullable<typeof nextConfig> }> };
 		const prepared = app as unknown as { server?: Renderer; renderServer?: Renderer };
 		const renderer = next.version === 14 ? prepared.renderServer! : prepared.server!;
@@ -445,6 +436,7 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 			if (cacheBinding) await cacheBindings.assertVersionedCacheBuild(cacheBinding);
 		}
 	} catch (error) {
+		cacheNamespaces.unregisterCacheNamespace(scope.directory);
 		await app.close().catch(() => {});
 		throw error;
 	}
