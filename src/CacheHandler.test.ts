@@ -1,4 +1,4 @@
-import { describe, it, beforeEach } from 'node:test';
+import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert';
 
 import { createRequire } from 'node:module';
@@ -13,11 +13,13 @@ import {
 // Load the handler through `require`, the way Next.js loads it, rather than through ESM interop — a
 // default import would bind to `module.exports` itself rather than the class.
 const HarperCacheHandler = createRequire(import.meta.url)('./CacheHandler.cjs')
-	.default as new (ctx?: { revalidatedTags?: string[] }) => {
+	.default as new (ctx?: { revalidatedTags?: string[]; serverDistDir?: string }) => {
 	get(key: string, ctx: unknown): Promise<{ lastModified?: number } | null>;
 	set(key: string, data: unknown, ctx: unknown): Promise<void>;
 	revalidateTag(tags: string | string[], durations?: { expire?: number }): Promise<void>;
 };
+
+const cacheNamespaces = createRequire(import.meta.url)('./cacheNamespace.cjs') as typeof import('./cacheNamespace.cjs');
 
 const NEXT_CACHE_TAGS_HEADER = 'x-next-cache-tags';
 const NEXT_16_MANIFEST = { tagsManifest: new Map(), areTagsStale: () => false };
@@ -365,5 +367,71 @@ describe('HarperCacheHandler reads before the tombstones are loaded', () => {
 		const handler = new HarperCacheHandler();
 
 		assert.notEqual(await handler.get('/page', pageCtx), null);
+	});
+});
+
+describe('HarperCacheHandler keeps each application\'s entries apart', () => {
+	// Next.js keys a page by its source route alone, so every app serving /isr asks for this same key.
+	const ISR_KEY = '/route-cache/APP_PAGE/c38585bae9266f2d684c4cd533090fd2a7343508ef724dfe5c9c985af08154be/$/isr';
+	const page = (html: string) => ({ ...appPage([]), html });
+
+	beforeEach(() => {
+		resetInvalidationStateForTesting();
+		useTagsManifestModuleForTesting(NEXT_16_MANIFEST);
+		cacheNamespaces.resetCacheNamespacesForTesting();
+	});
+	afterEach(() => cacheNamespaces.resetCacheNamespacesForTesting());
+
+	it("never serves a pull request preview's render to production, or the reverse", async () => {
+		installDatabases();
+		cacheNamespaces.registerCacheNamespace('/srv/components/shop', 'shop');
+		cacheNamespaces.registerCacheNamespace('/srv/components/shop-pr-7', 'shop-pr-7');
+		const production = new HarperCacheHandler({ serverDistDir: '/srv/components/shop/.next/server' });
+		const preview = new HarperCacheHandler({ serverDistDir: '/srv/components/shop-pr-7/.next/server' });
+
+		await preview.set(ISR_KEY, page('preview') as never, pageCtx);
+		assert.equal(await production.get(ISR_KEY, pageCtx), null, "production must not serve the preview's render");
+
+		await production.set(ISR_KEY, page('production') as never, pageCtx);
+		const fromPreview = (await preview.get(ISR_KEY, pageCtx)) as { value: { html: string } } | null;
+		const fromProduction = (await production.get(ISR_KEY, pageCtx)) as { value: { html: string } } | null;
+		assert.equal(fromPreview?.value.html, 'preview');
+		assert.equal(fromProduction?.value.html, 'production');
+	});
+
+	it('finds the application of an app nested in another, and of any distDir', async () => {
+		const { puts } = installDatabases();
+		cacheNamespaces.registerCacheNamespace('/srv/components/outer', 'outer');
+		cacheNamespaces.registerCacheNamespace('/srv/components/outer/inner', 'inner');
+
+		await new HarperCacheHandler({ serverDistDir: '/srv/components/outer/inner/build/server' }).set('/a', page('x') as never, pageCtx);
+		await new HarperCacheHandler({ serverDistDir: '/srv/components/outer/.next/server' }).set('/a', page('y') as never, pageCtx);
+
+		assert.deepEqual(
+			puts.map((put) => put.key),
+			['inner:/a', 'outer:/a']
+		);
+	});
+
+	it("uses the worker's only application when Next.js passes no serverDistDir", async () => {
+		const { puts } = installDatabases();
+		cacheNamespaces.registerCacheNamespace('/srv/components/shop-pr-7', 'shop-pr-7');
+
+		await new HarperCacheHandler().set('/a', page('x') as never, pageCtx);
+
+		assert.equal(puts[0].key, 'shop-pr-7:/a');
+	});
+
+	it("keeps Next.js's key when it cannot tell the application", async () => {
+		const { puts } = installDatabases();
+		await new HarperCacheHandler({ serverDistDir: '/elsewhere/.next/server' }).set('/a', page('x') as never, pageCtx);
+		cacheNamespaces.registerCacheNamespace('/srv/components/one', 'one');
+		cacheNamespaces.registerCacheNamespace('/srv/components/two', 'two');
+		await new HarperCacheHandler().set('/b', page('x') as never, pageCtx);
+
+		assert.deepEqual(
+			puts.map((put) => put.key),
+			['/a', '/b']
+		);
 	});
 });

@@ -424,6 +424,11 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 	const cacheBindings = !config.dev
 		? createRequire(import.meta.url)('./versionedCache.cjs') as typeof import('./versionedCache.cjs')
 		: undefined;
+	// Before Next.js constructs its cache handler, which looks its application up here.
+	(createRequire(import.meta.url)('./cacheNamespace.cjs') as typeof import('./cacheNamespace.cjs')).registerCacheNamespace(
+		scope.directory,
+		scope.appName
+	);
 	cacheBindings?.markProductionCache(join(scope.directory, '.next', 'server'));
 	const cacheBinding = await cacheBindings?.bindVersionedCache(scope.directory, config.cacheDirectory);
 	if (cacheBinding) scope.logger.debug?.(`Using Next.js versioned cache at ${cacheBinding.cacheDirectory}`);
