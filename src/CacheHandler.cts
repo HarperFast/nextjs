@@ -14,6 +14,7 @@ import type {
 
 import type { databases as DatabasesType } from 'harper';
 
+import { cacheNamespaceFor, namespacedCacheKey } from './cacheNamespace.cjs';
 import {
 	entryExpiresAt,
 	initializeInvalidationSubscription,
@@ -84,9 +85,13 @@ function isExpired(record: { lastModified?: number; expire?: number }): boolean 
 
 export default class HarperCacheHandler implements CacheHandler {
 	private revalidatedTags: string[];
+	// The Harper application this handler stores entries for; see cacheNamespace.cts. Tags are not namespaced: they
+	// name data, and applications sharing the data share its invalidations.
+	private namespace: string | undefined;
 
 	constructor(ctx?: CacheHandlerContext) {
 		this.revalidatedTags = ctx?.revalidatedTags ?? [];
+		this.namespace = cacheNamespaceFor(ctx?.serverDistDir);
 		void initializeInvalidationSubscription();
 	}
 
@@ -100,7 +105,7 @@ export default class HarperCacheHandler implements CacheHandler {
 		if (!(await initializeInvalidationSubscription())) return null;
 
 		const table = databases.harperfast_nextjs.nextjs_isr_cache;
-		const record = await table.get(key);
+		const record = await table.get(namespacedCacheKey(this.namespace, key));
 		if (!record || record.data === undefined) return null;
 
 		// Past its own `expire` the entry is no longer usable at all, regardless of tags.
@@ -149,7 +154,11 @@ export default class HarperCacheHandler implements CacheHandler {
 		// The raw `expire`, not the stored one: see `entryExpiresAt` on why an unbounded life is left to
 		// the table's own expiration rather than pinned for the year `toStoredLife` bounds it to.
 		const expiresAt = entryExpiresAt(now, cacheControl?.expire, now);
-		await table.put(key, { data, tags, revalidate, expire }, expiresAt === undefined ? undefined : ({ expiresAt } as never));
+		await table.put(
+			namespacedCacheKey(this.namespace, key),
+			{ data, tags, revalidate, expire },
+			expiresAt === undefined ? undefined : ({ expiresAt } as never)
+		);
 	}
 
 	async revalidateTag(tags: string | string[], durations?: { expire?: number }): Promise<void> {
