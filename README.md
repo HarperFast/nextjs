@@ -270,6 +270,28 @@ Set the Next.js [`basePath`](https://nextjs.org/docs/app/api-reference/config/ne
 
 Without a matching `basePath`, a request under the mount still reaches the right page or route handler, because the plugin hands Next.js the path relative to the mount through Harper's `Request.withNodeAdapter()`. That needs Harper 5.3.0 or later (5.3.3 or later on Node.js 26.11+); on an older Harper the plugin logs a warning and the mounted application does not route. Everything Next.js generates is still relative to the root, outside the mount: asset URLs, links, and redirects (including its trailing-slash redirect). Client-side assets do not load and navigation leaves the mount, so `basePath` is the supported setup.
 
+## Pull request previews
+
+A Next.js app can run as a Harper [pull request preview](https://docs.harper.fast/learn/developers/deploying-from-ci#per-pr-previews): each PR gets an isolated copy of the app on the cluster, at its own host. That guide covers setting previews up; this section covers what a Next.js app needs on top of it. It needs Harper 5.4 or later and `@harperfast/nextjs` 2.5.2 or later.
+
+**Build in CI and deploy the build.** Building on the cluster fails ([#57](https://github.com/HarperFast/nextjs/issues/57), [#58](https://github.com/HarperFast/nextjs/issues/58)), so set `prebuilt: true` and deploy the app directory together with its `.next` folder, leaving out `.next/cache`. The preview workflow must not run `next build` itself, since it holds the cluster's identity token: build each PR from a separate `pull_request` workflow, upload `.next` as an artifact, and have the preview job wait for that build, download it, and deploy the directory with HarperFast/deploy-action's `path` and `by_ref: false`. Deploying by reference ships no `.next`, and the preview's deploy fails with `Prebuilt mode is enabled, but <app>/.next does not exist`.
+
+**Read Harper data through the globals.** In server code, use the `tables` and `databases` globals rather than `import { tables } from 'harper'`. Turbopack resolves an external `harper` import through a link it writes into `.next/node_modules`, which points at the build machine's `node_modules` and does not survive a CI build ([#51](https://github.com/HarperFast/nextjs/issues/51)). Before Harper 5.4.2, a bundled `harper` import in a branched preview also reached the cluster's own databases instead of the preview's branch.
+
+**Data mode.** By default each preview runs on its own branch of the cluster's databases, including the `harperfast_nextjs` cache tables, so its cache entries, `revalidateTag()` and `revalidatePath()` stay in the preview. With `dataMode=shared`, the preview and production use the same tables:
+
+- Each application's cache entries are stored under its own name, so neither serves the other's pages or `fetch()` results. Before 2.5.2 they shared entries for the same route, and production could serve a preview's render.
+- Tag invalidations are shared, because tags name data, and the data is shared. A preview's `revalidateTag()` or `revalidatePath()` also expires production's entries with that tag or path, which costs production one render, and the other way round.
+- The preview's row in `nextjs_build_info` stays after the preview is dropped.
+
+**Server actions.** Next.js aborts a server action whose `Origin` does not match the request's host (`Invalid Server Actions request`). A proxy in front of a self-managed cluster must pass the preview's host through in `Host` or `X-Forwarded-Host`.
+
+**`basePath`.** A preview serves the app at the root of its own host, and `basePath` still applies there: with `basePath: '/shop'`, open the preview at `/shop`. The URL the deploy prints and comments on the PR is the host's root.
+
+**Cache directories.** The Next.js default cache and the Harper-backed cache handler below need no cleanup: the first lives in the preview's `.next/cache`, which dropping the preview removes, and the second in the database. The [versioned filesystem cache](#versioned-filesystem-cache) writes outside the app's directory and is never swept, so every preview, and every build of it, leaves a directory behind ([#75](https://github.com/HarperFast/nextjs/issues/75)). Don't use it for previews.
+
+**Not supported:** Harper's uWS HTTP mode ([#86](https://github.com/HarperFast/nextjs/issues/86)).
+
 ## Versioned filesystem cache
 
 To keep Next.js's incremental render and data caches on disk while isolating deployments, use `versionedCacheHandlerPath()` in `next.config.mjs` or `next.config.ts`:
@@ -470,7 +492,7 @@ Enabling the cache handler adds these tables to the `harperfast_nextjs` database
 
 | Table | Purpose |
 | --- | --- |
-| `nextjs_isr_cache` | One row per cached ISR/Data Cache entry. Stores `data` (the Next.js `IncrementalCacheValue`), `tags` (indexed), the entry's `revalidate`/`expire`, and `lastModified`. |
+| `nextjs_isr_cache` | One row per cached ISR/Data Cache entry. `id` is the application's name, a `:`, and Next.js's cache key. Stores `data` (the Next.js `IncrementalCacheValue`), `tags` (indexed), the entry's `revalidate`/`expire`, and `lastModified`. |
 | `nextjs_use_cache` | One row per `'use cache'` entry. Stores `value` (the rendered bytes as a `Blob`), `tags` (indexed), `timestamp`, and the entry's `stale`/`revalidate`/`expire`. |
 | `nextjs_cache_invalidation` | One row per invalidated tag. `id` is the tag itself; `timestamp` is when `revalidateTag` was called; `stale`/`expired` are the tag's invalidation in Next.js's terms; `lapsesAt` is when the row expires, which is later than any entry it invalidates. |
 
@@ -481,7 +503,7 @@ Enabling the cache handler adds these tables to the `harperfast_nextjs` database
 
 No manual migration is needed; existing tables, entries and tombstones keep working.
 
-- **Existing entries are kept** and served without regenerating.
+- **Existing entries are kept** and served without regenerating, except ISR and Data Cache entries when upgrading to 2.5.2: those move under the application's name, so each is regenerated once, and the old rows expire with the table.
 - **`tags` becomes indexed on both cache tables.** Harper builds the index for existing rows in the background on first start; nothing is unavailable meanwhile. On Harper 5.2.0 some worker threads were seen to keep reporting that index as unfinished until the next restart; the sweep falls back to a scan in that case, and reads are unaffected.
 - **Entries written by earlier versions** keep the Harper expiry they were written with: at most the table's 7 days.
 - **Tombstones written by earlier versions** (a bare `timestamp`) are read as an immediate expiry at that time. Pre-release builds of `'use cache'` support stored `revalidateTag(tag, profile)` as a timestamp up to a year ahead; those rows no longer block later invalidations of the same tag, and they expire on the table's own 7-day schedule.
