@@ -8,7 +8,7 @@ import { resolve, sep } from 'node:path';
  * through its own loader, so the two can hold separate copies of this module.
  */
 interface Registry {
-	prefixes: Map<string, string>;
+	prefixes: Map<string, { prefix: string; owner: object }>;
 	/** A handler's `serverDistDir` to its prefix, or null when it matches no app; Next.js builds a handler per request. */
 	lookups: Map<string, string | null>;
 }
@@ -16,13 +16,20 @@ const registryKey = Symbol.for('@harperfast/nextjs.cache-namespaces.v1');
 const nativeGlobal = globalThis as unknown as Record<symbol, Registry>;
 const registry = (nativeGlobal[registryKey] ??= { prefixes: new Map(), lookups: new Map() });
 
-export function registerCacheNamespace(appDirectory: string, applicationName: string): void {
-	registry.prefixes.set(resolve(appDirectory) + sep, `${applicationName}:`);
+/** Returns the registration, which only `unregisterCacheNamespace` with the same value removes. */
+export function registerCacheNamespace(appDirectory: string, applicationName: string): object {
+	const owner = {};
+	registry.prefixes.set(resolve(appDirectory) + sep, { prefix: `${applicationName}:`, owner });
 	registry.lookups.clear();
+	return owner;
 }
 
-export function unregisterCacheNamespace(appDirectory: string): void {
-	if (registry.prefixes.delete(resolve(appDirectory) + sep)) registry.lookups.clear();
+/** A later registration of the same directory, such as a retried load, is left in place. */
+export function unregisterCacheNamespace(appDirectory: string, owner: object): void {
+	const directory = resolve(appDirectory) + sep;
+	if (registry.prefixes.get(directory)?.owner !== owner) return;
+	registry.prefixes.delete(directory);
+	registry.lookups.clear();
 }
 
 /**
@@ -49,14 +56,14 @@ function getLogger(): { warn?(...args: unknown[]): void } {
 }
 
 function onlyPrefix(): string | null {
-	const prefixes = new Set(registry.prefixes.values());
+	const prefixes = new Set([...registry.prefixes.values()].map(({ prefix }) => prefix));
 	return prefixes.size === 1 ? prefixes.values().next().value! : null;
 }
 
 function longestMatch(serverDistDir: string): string | null {
 	let match: string | null = null;
 	let matchLength = -1;
-	for (const [directory, prefix] of registry.prefixes) {
+	for (const [directory, { prefix }] of registry.prefixes) {
 		if (directory.length > matchLength && serverDistDir.startsWith(directory)) {
 			match = prefix;
 			matchLength = directory.length;

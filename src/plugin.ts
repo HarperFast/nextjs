@@ -422,7 +422,7 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 	}
 
 	const cacheNamespaces = createRequire(import.meta.url)('./cacheNamespace.cjs') as typeof import('./cacheNamespace.cjs');
-	cacheNamespaces.registerCacheNamespace(scope.directory, scope.appName);
+	const cacheNamespace = cacheNamespaces.registerCacheNamespace(scope.directory, scope.appName);
 	let nextConfig: { basePath?: string; cacheHandler?: string; distDir?: string } | undefined;
 	try {
 		await app.prepare();
@@ -436,7 +436,7 @@ async function serve(scope: Scope, config: NextPluginConfig, next: NextPackage) 
 			if (cacheBinding) await cacheBindings.assertVersionedCacheBuild(cacheBinding);
 		}
 	} catch (error) {
-		cacheNamespaces.unregisterCacheNamespace(scope.directory);
+		cacheNamespaces.unregisterCacheNamespace(scope.directory, cacheNamespace);
 		await app.close().catch(() => {});
 		throw error;
 	}
