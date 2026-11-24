@@ -1,0 +1,57 @@
+import { fixture } from './fixture.ts';
+import { SECURE_PORT, decode, getHttp2 } from './http2.ts';
+
+const { test, expect } = fixture('next-16-mounted', { http: { http2: true, mtls: false } });
+
+test.describe('served under a urlPath mount', () => {
+	test('mount root reaches the Next.js home page', async ({ request, harper }) => {
+		const response = await request.get(`${harper.httpURL}/mounted`);
+		expect(response.status()).toBe(200);
+		expect(await response.text()).toContain('Mounted Home');
+	});
+
+	test('a nested page under the mount reaches its Next.js route', async ({ request, harper }) => {
+		const response = await request.get(`${harper.httpURL}/mounted/about`);
+		expect(response.status()).toBe(200);
+		expect(await response.text()).toContain('Mounted About');
+	});
+
+	test('Next.js sees the mount-relative path, not the requested one', async ({ request, harper }) => {
+		const response = await request.get(`${harper.httpURL}/mounted/api/echo`);
+		expect(response.status()).toBe(200);
+		expect(await response.json()).toEqual({ pathname: '/api/echo', search: '' });
+	});
+
+	test('the query string survives mount stripping', async ({ request, harper }) => {
+		const response = await request.get(`${harper.httpURL}/mounted/api/echo?q=1`);
+		expect(response.status()).toBe(200);
+		expect(await response.json()).toEqual({ pathname: '/api/echo', search: '?q=1' });
+	});
+
+	test('an HTTP/2 request reaches Next.js with its mount-relative path', async ({ harper }) => {
+		const response = await getHttp2(`https://${harper.hostname}:${SECURE_PORT}`, '/mounted/api/echo?q=1');
+		expect(response.status).toBe(200);
+		expect(JSON.parse(decode(response))).toEqual({ pathname: '/api/echo', search: '?q=1' });
+	});
+
+	test('the mount root renders over HTTP/2 with compression', async ({ harper }) => {
+		const response = await getHttp2(`https://${harper.hostname}:${SECURE_PORT}`, '/mounted', {
+			accept: 'text/html',
+			'accept-encoding': 'gzip',
+		});
+		expect(response.status).toBe(200);
+		expect(response.headers['content-encoding']).toBe('gzip');
+		expect(decode(response)).toContain('Mounted Home');
+	});
+
+	test('the mount root renders in a browser', async ({ page, harper }) => {
+		await page.goto(`${harper.httpURL}/mounted`);
+		await expect(page.locator('h1')).toHaveText('Mounted Home');
+	});
+});
+
+test('paths outside the mount are not served by Next.js', async ({ request, harper }) => {
+	const response = await request.get(`${harper.httpURL}/about`);
+	expect(response.status()).toBe(404);
+	expect(await response.text()).not.toContain('Mounted About');
+});

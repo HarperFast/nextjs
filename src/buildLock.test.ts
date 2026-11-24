@@ -1,17 +1,8 @@
-import { databases, type Scope } from 'harper';
+import type { Scope } from 'harper';
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 
 import { withBuildLock, type BuildLockDeps } from './buildLock.js';
-
-// The build lock coordinates through `databases.harperfast_nextjs.nextjs_build_info` (imported from
-// `harper`). These unit tests run "outside Harper", so clear any real `harperfast_nextjs` database a local
-// Harper install may have opened on import, then inject a mock table per test. Because `databases` is a
-// shared singleton, assigning at that path is what makes the module under test see the mock — this is why
-// `buildLock` imports `databases` instead of reading `globalThis`.
-(databases as any).harperfast_nextjs = {};
-
-const TABLE = 'nextjs_build_info';
 
 describe('withBuildLock', () => {
 	/** Records as Harper returns them from `table.get`: a status/buildId plus the time last written. */
@@ -38,12 +29,6 @@ describe('withBuildLock', () => {
 		};
 	}
 
-	/** Install `table` as the build-info table for one test, removing it afterward so tests don't leak state. */
-	function useTable(t: any, table: unknown) {
-		(databases as any).harperfast_nextjs[TABLE] = table;
-		t.after(() => delete (databases as any).harperfast_nextjs[TABLE]);
-	}
-
 	// A minimal Scope: `withBuildLock` only touches `appName`/`directory` (for logs) and the `logger`.
 	const scope = { appName: 'test-app', directory: '/test/dir', logger: {} } as unknown as Scope;
 
@@ -62,7 +47,6 @@ describe('withBuildLock', () => {
 	}
 
 	it('runs the build directly when no Harper table is available (e.g. unit tests / outside Harper)', async () => {
-		delete (databases as any).harperfast_nextjs[TABLE];
 		const events: string[] = [];
 
 		await withBuildLock(scope, makeDeps(events));
@@ -70,12 +54,11 @@ describe('withBuildLock', () => {
 		assert.deepStrictEqual(events, ['build'], 'builds without any locking when there is no table');
 	});
 
-	it('claims the build, runs it, then records success when no record exists', async (t) => {
+	it('claims the build, runs it, then records success when no record exists', async () => {
 		const events: string[] = [];
 		const table = makeTable(events); // get → undefined (no existing record)
-		useTable(t, table);
 
-		await withBuildLock(scope, makeDeps(events, 'abc123'));
+		await withBuildLock(scope, { ...makeDeps(events, 'abc123'), table });
 
 		assert.deepStrictEqual(
 			events,
@@ -87,74 +70,67 @@ describe('withBuildLock', () => {
 		assert.deepStrictEqual(table.puts.map((p) => p.key), ['test-app', 'test-app'], 'keyed by appName');
 	});
 
-	it('waits without building when another worker holds a fresh claim, returning once it succeeds', async (t) => {
+	it('waits without building when another worker holds a fresh claim, returning once it succeeds', async () => {
 		const events: string[] = [];
 		// Gate sees a fresh "building" claim; after one poll the sibling has finished with a matching build.
 		const table = makeTable(events, [building(), success('done')]);
-		useTable(t, table);
 
-		await withBuildLock(scope, makeDeps(events, 'ignored', () => 'done'));
+		await withBuildLock(scope, { ...makeDeps(events, 'ignored', () => 'done'), table });
 
 		assert.ok(!events.includes('build'), 'does not build while another worker holds the claim');
 		assert.deepStrictEqual(table.puts, [], 'never writes a claim of its own — the sibling produced the output');
 	});
 
-	it('treats a "building" record with no recent heartbeat as abandoned and builds anyway', async (t) => {
+	it('treats a "building" record with no recent heartbeat as abandoned and builds anyway', async () => {
 		const events: string[] = [];
 		// No heartbeat for longer than the stale threshold → the holder is assumed crashed.
 		const table = makeTable(events, [building(5 * 60 * 1000)]);
-		useTable(t, table);
 
-		await withBuildLock(scope, makeDeps(events));
+		await withBuildLock(scope, { ...makeDeps(events), table });
 
 		assert.deepStrictEqual(events, ['put:building', 'build', 'put:success'], 'reclaims and builds past a stale claim');
 	});
 
-	it('reuses a fresh successful build without building when the on-disk BUILD_ID matches', async (t) => {
+	it('reuses a fresh successful build without building when the on-disk BUILD_ID matches', async () => {
 		const events: string[] = [];
 		const table = makeTable(events, [success('match')]);
-		useTable(t, table);
 
-		await withBuildLock(scope, makeDeps(events, 'ignored', () => 'match'));
+		await withBuildLock(scope, { ...makeDeps(events, 'ignored', () => 'match'), table });
 
 		assert.deepStrictEqual(events, [], 'no build and no writes — the existing build is reused');
 	});
 
-	it('rebuilds when a fresh successful record does not match the on-disk BUILD_ID', async (t) => {
+	it('rebuilds when a fresh successful record does not match the on-disk BUILD_ID', async () => {
 		const events: string[] = [];
 		const table = makeTable(events, [success('old')]);
-		useTable(t, table);
 
-		await withBuildLock(scope, makeDeps(events, 'fresh', () => 'different'));
+		await withBuildLock(scope, { ...makeDeps(events, 'fresh', () => 'different'), table });
 
 		assert.deepStrictEqual(events, ['put:building', 'build', 'put:success'], 'a BUILD_ID mismatch forces a rebuild');
 	});
 
-	it('rebuilds when the last successful build is older than the fresh-build window', async (t) => {
+	it('rebuilds when the last successful build is older than the fresh-build window', async () => {
 		const events: string[] = [];
 		// Matching BUILD_ID but older than 5s → not reusable; a restart should rebuild.
 		const table = makeTable(events, [success('match', 6000)]);
-		useTable(t, table);
 
-		await withBuildLock(scope, makeDeps(events, 'fresh', () => 'match'));
+		await withBuildLock(scope, { ...makeDeps(events, 'fresh', () => 'match'), table });
 
 		assert.deepStrictEqual(events, ['put:building', 'build', 'put:success'], 'a stale success record is rebuilt');
 	});
 
-	it('skips building when a sibling just recorded a failure (avoids failing on every thread)', async (t) => {
+	it('skips building when a sibling just recorded a failure (avoids failing on every thread)', async () => {
 		const events: string[] = [];
 		const table = makeTable(events, [failure()]);
-		useTable(t, table);
 
-		await withBuildLock(scope, makeDeps(events));
+		await withBuildLock(scope, { ...makeDeps(events), table });
 
 		assert.deepStrictEqual(events, [], 'does not rebuild while a fresh failure is recorded');
 	});
 
-	it('records failure and rethrows when the build it runs throws', async (t) => {
+	it('records failure and rethrows when the build it runs throws', async () => {
 		const events: string[] = [];
 		const table = makeTable(events);
-		useTable(t, table);
 		const deps: BuildLockDeps = {
 			getBuildId: () => null,
 			runBuild: async () => {
@@ -163,7 +139,7 @@ describe('withBuildLock', () => {
 			},
 		};
 
-		await assert.rejects(withBuildLock(scope, deps), /boom/);
+		await assert.rejects(withBuildLock(scope, { ...deps, table }), /boom/);
 
 		assert.deepStrictEqual(events, ['put:building', 'build', 'put:failure'], 'claims, fails, then records the failure');
 	});
@@ -173,7 +149,6 @@ describe('withBuildLock', () => {
 		t.mock.timers.enable({ apis: ['setTimeout'] });
 		const events: string[] = [];
 		const table = makeTable(events); // get → undefined (no existing record)
-		useTable(t, table);
 
 		let finishBuild!: () => void;
 		const deps: BuildLockDeps = {
@@ -181,7 +156,7 @@ describe('withBuildLock', () => {
 			runBuild: () => new Promise<string>((resolve) => (finishBuild = () => resolve('hb-id'))),
 		};
 
-		const done = withBuildLock(scope, deps);
+		const done = withBuildLock(scope, { ...deps, table });
 		await tick(); // claim the build, start the build, and arm the heartbeat
 		assert.deepStrictEqual(events, ['put:building'], 'claims once up front');
 
